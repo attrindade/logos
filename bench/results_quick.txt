@@ -1,0 +1,52 @@
+=== qwen2.5:7b-instruct-q4_K_M ===
+  2026-08-23_22-46-52_Diario.txt: OK | 65.0s
+    -> 'titulo: Diário de uma semana com tosse e projetos\ntags: diário, saúde, projetos, Blender, Python\nresumo: O autor registra que está doente, mas se empolga com atividades em Blender e Python, participa '
+  2026-08-23_22-52-10_Planejamento.txt: OK | 74.9s
+    -> 'titulo: Planejamento para a semana e futuros projetos\ntags: planejamento, projeto, e-mail, CRM, ajuste\nresumo: Planejamento para a semana, incluindo ajustes em páginas web, envio de e-mails a advogado'
+  2026-08-23_23-41-40_Inbox.txt: OK | 27.4s
+    -> 'titulo: Fluxo de anotações e transcrição\ntags: anotações, transcrição, inteligência artificial, processamento\nresumo: O usuário deseja sincronizar anotações em uma pasta do computador com um celular, '
+  2026-08-23_23-13-03_Inbox.txt: OK | 12.1s
+    -> 'titulo: Lembretes para Gamboa\ntags: lembretes, gamboa, anotação, importante\nresumo: O interlocutor lembra de conversar com Gamboa sobre uma anotação importante.'
+
+=== llama3.1:8b-instruct-q4_K_M ===
+  2026-08-23_22-46-52_Diario.txt: OK | 78.4s
+    -> 'titulo: Primeiro Diário - Doença e Trabalho\ntags: diário, saúde, trabalho, Blender, Python\nresumo: O diário registra a doença do autor e a atividade em curso, incluindo a participação em um evento sob'
+  2026-08-23_22-52-10_Planejamento.txt: OK | 95.6s
+    -> 'titulo: Planejamento da semana\ntags: planejamento, semana, trabalho, produtividade\nresumo: Fazer ajustes na página do Eduardo, configurar e-mail da Renato Barcelos e usar plataforma gratuita de e-mail'
+  2026-08-23_23-41-40_Inbox.txt: OK | 28.0s
+    -> 'titulo: Fluxo de Anotações Automatizado\ntags: segunda-cerebro, automação, anotações\nresumo: O usuário descreve um fluxo de automação para sincronizar anotações entre um computador e um celular, utiliz'
+  2026-08-23_23-13-03_Inbox.txt: OK | 13.9s
+    -> 'titulo: Precisar falar com Gamboa\ntags: lembrar, anotação, importante\nresumo: Transcrição muito curta, sem informações relevantes.'
+
+=== qwen2.5:3b-instruct-q4_K_M ===
+  2026-08-23_22-46-52_Diario.txt: OK | 33.4s
+    -> 'titulo: Dia de doença e reflexões\ntags: clima, palestra, gato, trabalho\nresumo: O autor relata um dia de tosse e trabalho no domingo. Ele fala sobre atividades relacionadas ao Blender, Python, e um cl'
+  2026-08-23_22-52-10_Planejamento.txt: OK | 34.4s
+    -> 'titulo: Semana de trabalho\ntags: trabalho, planos, PPJ, CRM\nresumo: A transcrição descreve objetivos para a semana, incluindo ajustes em páginas de dados e e-mails, preparação para palestras, e planej'
+  2026-08-23_23-41-40_Inbox.txt: OK | 12.9s
+    -> 'titulo: Fluxo de Anotações\ntags: fluxo, anotações, sincronização, transcrição, LLM, segundo cérebro\nresumo: O fluxo envolve a criação de um diretório para sincronização com o celular, onde anotações s'
+  2026-08-23_23-13-03_Inbox.txt: OK | 6.9s
+    -> 'titulo: Lembrete de falar com Gamboa\ntags: lembrar, anotação, importante\nresumo: Foi mencionado que há algo importante para lembrar, especificamente ligar para Gamboa.'
+
+=== RESUMO ===
+qwen2.5:7b-instruct-q4_K_M:
+  YAML válido: 4/4
+  campos lista corretos: 0/4
+  vazamento de inglês: 4/4
+  tempo médio/nota: 44.9s
+  erros: 0
+
+llama3.1:8b-instruct-q4_K_M:
+  YAML válido: 4/4
+  campos lista corretos: 0/4
+  vazamento de inglês: 4/4
+  tempo médio/nota: 54.0s
+  erros: 0
+
+qwen2.5:3b-instruct-q4_K_M:
+  YAML válido: 4/4
+  campos lista corretos: 0/4
+  vazamento de inglês: 4/4
+  tempo médio/nota: 21.9s
+  erros: 0
+

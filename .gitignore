@@ -1,0 +1,92 @@
+# =========================================================
+# Python & Virtual Environments
+# =========================================================
+.venv/
+venv/
+ENV/
+env/
+.env
+.venv*/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# =========================================================
+# Logos Specific (Data, Media, Models, User State)
+# =========================================================
+# Local user configuration created by setup.py
+logos_config.yaml
+*.local.yaml
+
+# Data directories (if placed inside repo root)
+models/
+Inbox/
+Archive/
+Transcripts/
+Notes/
+state/
+logs/
+
+# Raw media / test audio dumps
+*.m4a
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.aac
+*.log
+*.tmp
+*.bak
+
+# =========================================================
+# Operating System & Editors
+# =========================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDEs & Tooling
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# Hugging Face & Ollama caches
+huggingface/
+.cache/
