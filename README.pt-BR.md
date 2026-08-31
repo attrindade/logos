@@ -33,7 +33,7 @@ chmod +x install.sh
 3. **[Ollama](https://ollama.com)** (para inferência e sumarização local):
    - Instale o Ollama e baixe o modelo sugerido:
      ```bash
-     ollama pull qwen2.5:3b-instruct-q4_K_M
+     ollama pull gemma4:26b
      ```
 
 ---
@@ -114,6 +114,6 @@ whisper_compute_type: "int8"
 whisper_cpu_threads: 6
 whisper_language: "pt"
 ollama_host: "http://localhost:11434"
-llm_model: "qwen2.5:3b-instruct-q4_K_M"
+llm_model: "gemma4:26b"
 archive_retention_days: 60
 ```

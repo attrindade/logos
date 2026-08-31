@@ -188,7 +188,7 @@ def step_setup_whisper(data_root: str):
 def step_setup_ollama(ollama_models: list[str]):
     console.print("\n[bold cyan]4. LLM Configuration (Ollama)[/bold cyan]")
     
-    default_model = "qwen2.5:3b-instruct-q4_K_M"
+    default_model = "gemma4:26b"
     
     if ollama_models:
         console.print(f"[dim]Models detected in your local Ollama: {', '.join(ollama_models)}[/dim]")

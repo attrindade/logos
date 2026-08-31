@@ -42,7 +42,7 @@ def main():
     config.TRANSCRIPTS_DIR = tmpdir / "Transcripts"
     config.NOTES_DIR = tmpdir / "Notes"
     config.ARCHIVE_DIR = tmpdir / "Archive"
-    config.LLM_MODEL = "qwen2.5:3b-instruct-q4_K_M"
+    config.LLM_MODEL = "gemma4:26b"
 
     dst = inbox / "2026-08-23 23-13-03.wav"
     create_dummy_wav(dst)
