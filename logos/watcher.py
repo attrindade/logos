@@ -13,6 +13,7 @@ from watchdog.observers import Observer
 from . import config
 from .ledger import Entry, Ledger, State
 from .pipeline import process_file, retry_failed
+from .status import PipelineStage, tracker
 from .triage import is_ignored
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ def _wait_for_stable_file(path: Path) -> bool:
         else:
             stable_reads = 0
         last_size = size
+
+        tracker.set_stage(
+            PipelineStage.STABILIZING,
+            filename=path.name,
+            file_size=size,
+            message="Sincronizando / validando estabilidade na Inbox...",
+            details=f"Verificação {stable_reads}/{config.STABILITY_CHECK_COUNT} ({round(size / 1024, 1)} KB)",
+        )
         time.sleep(config.STABILITY_CHECK_INTERVAL_S)
 
     try:
@@ -76,12 +85,7 @@ def expire_archive(ledger: Ledger) -> None:
 
 def scan_inbox(ledger: Ledger) -> None:
     """Varre a Inbox inteira — cobre arquivos que chegaram enquanto o watcher estava
-    parado, e retoma qualquer TRANSCRIBED pendente de enriquecimento.
-
-    Checa o ledger ANTES de esperar estabilidade: em toda reinicialização a maioria
-    dos arquivos já está ENRICHED, e a espera de estabilidade custa ~10s por arquivo
-    (STABILITY_CHECK_INTERVAL_S x STABILITY_CHECK_COUNT) — gasto inútil se não há
-    nada novo a processar."""
+    parado, e retoma qualquer TRANSCRIBED pendente de enriquecimento."""
     if not config.INBOX_DIR.exists():
         return
         
@@ -97,6 +101,7 @@ def scan_inbox(ledger: Ledger) -> None:
         if not _wait_for_stable_file(path):
             continue
         process_file(path, ledger)
+        tracker.set_idle()
 
 
 class _InboxHandler(FileSystemEventHandler):
@@ -117,6 +122,7 @@ class _InboxHandler(FileSystemEventHandler):
             return
         if _wait_for_stable_file(path):
             process_file(path, self.ledger)
+            tracker.set_idle()
 
 
 def run():
@@ -142,6 +148,8 @@ def run():
     scan_inbox(ledger)
     expire_archive(ledger)
 
+    tracker.set_idle("Watcher ativo • Monitorando Inbox")
+
     observer = Observer()
     observer.schedule(_InboxHandler(ledger), str(config.INBOX_DIR), recursive=False)
     observer.start()
@@ -150,16 +158,19 @@ def run():
     last_daily_check = datetime.now()
     try:
         while True:
-            time.sleep(60)
+            time.sleep(10)
+            tracker.heartbeat()
             if datetime.now() - last_daily_check >= timedelta(days=1):
                 expire_archive(ledger)
                 last_daily_check = datetime.now()
     except KeyboardInterrupt:
         logger.info("Encerrando watcher...")
+        tracker.set_idle("Watcher parado.")
         observer.stop()
     observer.join()
 
 
 if __name__ == "__main__":
     run()
+
 

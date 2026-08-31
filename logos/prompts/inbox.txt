@@ -25,11 +25,11 @@ pessoas:
 projetos:
   - "[[Projeto]]"
 
-Regras:
+Regras e Inferência de Entidades:
 - Responda em português do Brasil.
 - Use listas com traço (- "[[Nome]]") para pessoas e projetos, SEMPRE com aspas duplas nas strings.
-- Use [[Wikilinks]] para pessoas, projetos, times e ferramentas mencionados.
-- Não invente informações que não constam na transcrição.
+- Conexão e Inferência Ativa: Sempre que uma pessoa for mencionada, inclua ela e também infira/adicione o projeto correspondente na lista de projetos (ex: se citou Jonas -> inclua [[pesq-bonan]]). Da mesma forma, se citou um projeto (ex: manifestações) -> inclua o projeto [[pesq-manifestacao]] e as pessoas relacionadas ([[Eduardo]], [[Euzeneia]]).
+- Use [[Wikilinks]] para pessoas, projetos, times e ferramentas nas frases do resumo e nas listas.
 - Se a transcrição for vazia ou mero ruído, registre isso no resumo e deixe os demais campos vazios.
 
 Transcrição:

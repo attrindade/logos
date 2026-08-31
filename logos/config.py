@@ -40,6 +40,8 @@ TRANSCRIPTS_DIR = DATA_ROOT / "Transcripts"
 STATE_DIR = DATA_ROOT / "state"
 LOGS_DIR = DATA_ROOT / "logs"
 LEDGER_PATH = STATE_DIR / "ledger.json"
+STATUS_PATH = STATE_DIR / "status.json"
+
 
 # ---------------------------------------------------------
 # Modelo Whisper (STT)
