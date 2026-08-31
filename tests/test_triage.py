@@ -21,7 +21,7 @@ def main():
     results.append(check(triage_route_from_text("Diário de hoje foi muito produtivo...") == Route.DIARIO, "primeira palavra 'Diário' -> Diario"))
     results.append(check(triage_route_from_text("diario: hoje acordei cedo") == Route.DIARIO, "primeira palavra 'diario:' com pontuação -> Diario"))
     results.append(check(triage_route_from_text("Planejamento para a próxima semana...") == Route.PLANEJAMENTO, "primeira palavra 'Planejamento' -> Planejamento"))
-    results.append(check(triage_route_from_text("planejar as metas do mês") == Route.PLANEJAMENTO, "primeira palavra 'planejar' -> Planejamento"))
+    results.append(check(triage_route_from_text("planejar as metas do mês") == Route.INBOX, "primeira palavra 'planejar' -> Inbox (não é Planejamento)"))
     results.append(check(triage_route_from_text("Hoje eu preciso comprar pão e leite") == Route.INBOX, "outra primeira palavra ('Hoje') -> Inbox (Nota)"))
     results.append(check(triage_route_from_text("Ideia de projeto para o app") == Route.INBOX, "outra primeira palavra ('Ideia') -> Inbox (Nota)"))
     results.append(check(triage_route_from_text("") == Route.INBOX, "transcrição vazia -> Inbox (Nota)"))

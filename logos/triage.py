@@ -72,8 +72,8 @@ def _normalize_word(word: str) -> str:
 
 def triage_route_from_text(transcript: str) -> Route:
     """Classifica a rota pela primeira palavra dita no áudio:
-    - 'diario' / 'diários' -> Route.DIARIO
-    - 'planejamento' / 'planejar' -> Route.PLANEJAMENTO
+    - 'diario' / 'diarios' -> Route.DIARIO
+    - 'planejamento' / 'planejamentos' -> Route.PLANEJAMENTO
     - qualquer outra palavra -> Route.INBOX (nota avulsa)
     """
     if not transcript or not transcript.strip():
@@ -87,7 +87,7 @@ def triage_route_from_text(transcript: str) -> Route:
 
     if first_word in ("diario", "diarios"):
         return Route.DIARIO
-    elif first_word in ("planejamento", "planejar", "planejamentos"):
+    elif first_word in ("planejamento", "planejamentos"):
         return Route.PLANEJAMENTO
     return Route.INBOX
 
