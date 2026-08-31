@@ -12,14 +12,14 @@ Contexto de Referência do Second Brain (utilize para identificar e conectar ent
 
 Sua tarefa: produzir APENAS um bloco YAML válido com exatamente estes campos, nada além disso — sem saudação, sem explicação, sem markdown de código (fences ```) ao redor:
 
-titulo: título conciso e acionável (até 8 palavras) definindo o objetivo central
+titulo: "Título conciso e acionável entre aspas (até 8 palavras)"
 tags:
   - palavra1
   - palavra2
-prioridade: alta, media ou baixa
-status: ativo, bloqueado ou rascunho
-resumo: 2 a 3 frases resumindo o plano e contexto
-proxima_acao: a primeira ação física/concreta imediata a realizar (frase curta no infinitivo)
+prioridade: alta
+status: ativo
+resumo: "2 a 3 frases resumindo o plano e contexto."
+proxima_acao: "a primeira ação física/concreta imediata a realizar no infinitivo"
 acoes:
   - "Tarefa 1 no infinitivo"
   - "Tarefa 2 no infinitivo"
@@ -34,6 +34,7 @@ projetos:
 
 Regras e Inferência de Entidades:
 - Responda em português do Brasil.
+- Use aspas duplas em todos os campos de texto escalar (titulo, resumo, proxima_acao).
 - Use listas com traço (- "[[Nome]]") para pessoas e projetos, SEMPRE com aspas duplas nas strings.
 - Conexão e Inferência Ativa: Sempre que uma pessoa for mencionada, inclua ela e também infira/adicione o projeto correspondente na lista de projetos (ex: se citou Jonas -> inclua [[pesq-bonan]]). Da mesma forma, se citou um projeto (ex: manifestações) -> inclua o projeto [[pesq-manifestacao]] e as pessoas relacionadas ([[Eduardo]], [[Euzeneia]]).
 - Use [[Wikilinks]] nas menções a pessoas, projetos, times e ferramentas nas frases do resumo e ações.

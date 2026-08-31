@@ -4,6 +4,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 
 class Route(str, Enum):
@@ -34,8 +35,9 @@ def is_ignored(filename: str) -> bool:
 
 
 def _strip_extension(filename: str) -> str:
-    idx = filename.rfind(".")
-    return filename[:idx] if idx > 0 else filename
+    filename_str = str(filename)
+    idx = filename_str.rfind(".")
+    return filename_str[:idx] if idx > 0 else filename_str
 
 
 def _strip_evr_prefix(stem: str) -> str:
@@ -46,7 +48,8 @@ def _strip_evr_prefix(stem: str) -> str:
 
 def triage_from_filename(filename: str) -> datetime:
     """Extrai o timestamp de gravação a partir do nome do arquivo."""
-    stem = _strip_extension(filename)
+    name = Path(filename).name if isinstance(filename, Path) else str(filename)
+    stem = _strip_extension(name)
     stem = _strip_evr_prefix(stem)
 
     m = _NAME_RE.match(stem)

@@ -12,12 +12,12 @@ Contexto de Referência do Second Brain (utilize para identificar e conectar ent
 
 Sua tarefa: produzir APENAS um bloco YAML válido com exatamente estes campos, nada além disso — sem saudação, sem explicação, sem markdown de código (fences ```) ao redor:
 
-titulo: título curto e expressivo (até 8 palavras) capturando o tema central
+titulo: "Título curto e expressivo entre aspas (até 8 palavras)"
 tags:
   - palavra1
   - palavra2
-humor: estado emocional/energia percebida (ex: focado, reflexivo, ansioso, empolgado, cansado, calmo)
-resumo: 2 a 4 frases sintetizando o conteúdo e os sentimentos de forma neutra
+humor: "estado emocional percebido"
+resumo: "2 a 4 frases sintetizando o conteúdo e os sentimentos de forma neutra."
 vitorias: []
 gratidao: []
 tensoes: []
@@ -29,6 +29,7 @@ projetos:
 
 Regras e Inferência de Entidades:
 - Responda em português do Brasil.
+- Use aspas duplas em todos os campos de texto escalar (titulo, humor, resumo).
 - Use listas com traço (- "[[Nome]]") para pessoas e projetos, SEMPRE com aspas duplas nas strings.
 - Conexão e Inferência Ativa: Sempre que uma pessoa for mencionada, inclua ela e também infira/adicione o projeto correspondente na lista de projetos (ex: se citou Jonas -> inclua [[pesq-bonan]]). Da mesma forma, se citou um projeto (ex: manifestações) -> inclua o projeto [[pesq-manifestacao]] e as pessoas relacionadas ([[Eduardo]], [[Euzeneia]]).
 - Use [[Wikilinks]] nas menções a pessoas, projetos, times e ferramentas nas frases e nas listas de entidades.

@@ -109,10 +109,23 @@ def enrich(transcript: str, route: Route, model: str = None) -> dict:
     raw = _strip_yaml_fences(raw)
     try:
         parsed = yaml.safe_load(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("YAML não é um dict")
-        return parsed
+        if isinstance(parsed, dict):
+            return parsed
     except Exception as e:
-        logger.warning(f"Falha ao parsear YAML da LLM: {e}. Resposta bruta preservada.")
-        return {"titulo": "(falha ao estruturar)", "tags": [], "resumo": raw[:500]}
+        logger.warning(f"Falha no safe_load do YAML: {e}. Tentando extração resiliente.")
+
+    # Fallback resiliente campo a campo via regex
+    fallback = {}
+    m_title = re.search(r"^titulo:\s*[\"']?(.*?)[\"']?$", raw, re.MULTILINE | re.IGNORECASE)
+    if m_title:
+        fallback["titulo"] = m_title.group(1).strip()
+    
+    m_resumo = re.search(r"^resumo:\s*[\"']?(.*?)[\"']?$", raw, re.MULTILINE | re.IGNORECASE)
+    if m_resumo:
+        fallback["resumo"] = m_resumo.group(1).strip()
+        
+    fallback.setdefault("titulo", "Nota de voz")
+    fallback.setdefault("tags", [])
+    fallback.setdefault("resumo", raw[:500])
+    return fallback
 
