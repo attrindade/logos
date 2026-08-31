@@ -73,9 +73,15 @@ def _ollama_generate(prompt: str, model: str = None, keep_alive: str = None) -> 
 
 
 def _strip_yaml_fences(raw: str) -> str:
-    """Remove ```yaml ... ``` ou ``` ... ``` se o modelo insistir em cercar a resposta."""
-    m = re.match(r"^```(?:yaml)?\s*\n(.*)\n```\s*$", raw.strip(), re.DOTALL)
-    return m.group(1) if m else raw
+    """Remove tags de raciocínio (thinking) e cercas ```yaml ... ``` se o modelo emitir."""
+    # Remove blocos <|channel>thought ... <channel|> ou <think> ... </think>
+    raw = re.sub(r"<\|channel>thought.*?<channel\|>", "", raw, flags=re.DOTALL)
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    raw = raw.strip()
+    
+    # Remove cercas markdown
+    m = re.match(r"^```(?:yaml)?\s*\n(.*)\n```\s*$", raw, re.DOTALL)
+    return m.group(1).strip() if m else raw
 
 
 def enrich(transcript: str, route: Route, model: str = None) -> dict:

@@ -63,7 +63,7 @@ WHISPER_VAD_FILTER = bool(os.getenv("WHISPER_VAD_FILTER") or _user_cfg.get("whis
 OLLAMA_HOST = os.getenv("OLLAMA_HOST") or _user_cfg.get("ollama_host", "http://localhost:11434")
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX") or _user_cfg.get("ollama_num_ctx", 8192))
 OLLAMA_KEEP_ALIVE = str(os.getenv("OLLAMA_KEEP_ALIVE") or _user_cfg.get("ollama_keep_alive", "0"))
-LLM_MODEL = os.getenv("LLM_MODEL") or _user_cfg.get("llm_model", "gemma4:26b")
+LLM_MODEL = os.getenv("LLM_MODEL") or _user_cfg.get("llm_model", "gemma4:e4b")
 CHUNK_TOKEN_THRESHOLD = int(os.getenv("CHUNK_TOKEN_THRESHOLD") or _user_cfg.get("chunk_token_threshold", 6500))
 
 # ---------------------------------------------------------
