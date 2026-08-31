@@ -29,10 +29,14 @@ _DEFAULT_DATA_ROOT = Path.home() / "Logos"
 _raw_data_root = os.getenv("LOGOS_DATA_ROOT") or _user_cfg.get("data_root")
 DATA_ROOT = Path(_raw_data_root).expanduser().resolve() if _raw_data_root else _DEFAULT_DATA_ROOT
 
-INBOX_DIR = DATA_ROOT / "Inbox"
+_raw_inbox_dir = os.getenv("LOGOS_INBOX_DIR") or _user_cfg.get("inbox_dir")
+INBOX_DIR = Path(_raw_inbox_dir).expanduser().resolve() if _raw_inbox_dir else DATA_ROOT / "Inbox"
+
+_raw_notes_dir = os.getenv("LOGOS_NOTES_DIR") or _user_cfg.get("notes_dir")
+NOTES_DIR = Path(_raw_notes_dir).expanduser().resolve() if _raw_notes_dir else DATA_ROOT / "Notes"
+
 ARCHIVE_DIR = DATA_ROOT / "Archive"
 TRANSCRIPTS_DIR = DATA_ROOT / "Transcripts"
-NOTES_DIR = DATA_ROOT / "Notes"
 STATE_DIR = DATA_ROOT / "state"
 LOGS_DIR = DATA_ROOT / "logs"
 LEDGER_PATH = STATE_DIR / "ledger.json"
