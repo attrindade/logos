@@ -1,5 +1,6 @@
-"""Deriva rota e timestamp a partir do nome do arquivo de áudio."""
+"""Deriva rota e timestamp a partir da fala (primeira palavra) e do arquivo de áudio."""
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -11,8 +12,7 @@ class Route(str, Enum):
     INBOX = "Inbox"
 
 
-# "2026-08-23 22-46-52 D.m4a" / "2026-08-23 22-46-52 D4.m4a" / "2026-08-23 22-46-52 Diário.m4a"
-# / "2026-08-23 22-46-52.m4a"
+# Padrão de nome gerado por apps de gravação: "2026-08-23 22-46-52.m4a" ou com sufixos
 _NAME_RE = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})\s(?P<time>\d{2}-\d{2}-\d{2})(?:\s(?P<tag>.*))?$"
 )
@@ -33,47 +33,67 @@ def is_ignored(filename: str) -> bool:
     return filename.startswith(".")
 
 
-def triage(filename: str) -> Triage:
-    """Nunca lança exceção e nunca descarta: nome não reconhecido cai em Route.INBOX
-    com recorded_at = agora, para nunca perder um arquivo silenciosamente."""
-    stem = _strip_extension(filename)
-    stem = _strip_evr_prefix(stem)
-
-    m = _NAME_RE.match(stem)
-    if not m:
-        return Triage(route=Route.INBOX, recorded_at=datetime.now(), tag="")
-
-    date_part = m.group("date")
-    time_part = m.group("time").replace("-", ":")
-    tag = (m.group("tag") or "").strip()
-
-    try:
-        recorded_at = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        recorded_at = datetime.now()
-
-    route = _route_from_tag(tag)
-    return Triage(route=route, recorded_at=recorded_at, tag=tag)
-
-
 def _strip_extension(filename: str) -> str:
     idx = filename.rfind(".")
     return filename[:idx] if idx > 0 else filename
 
 
 def _strip_evr_prefix(stem: str) -> str:
-    """".evr_recently_deleted_(TIMESTAMP)2026-08-23 23-07-27 Diário" -> "2026-08-23 23-07-27 Diário" """
+    """.evr_recently_deleted_(TIMESTAMP)2026-08-23 23-07-27 -> 2026-08-23 23-07-27"""
     m = re.match(r"^\.evr_recently_deleted_\(\d+\)(?P<rest>.*)$", stem)
     return m.group("rest") if m else stem
 
 
-def _route_from_tag(tag: str) -> Route:
-    if not tag:
+def triage_from_filename(filename: str) -> datetime:
+    """Extrai o timestamp de gravação a partir do nome do arquivo."""
+    stem = _strip_extension(filename)
+    stem = _strip_evr_prefix(stem)
+
+    m = _NAME_RE.match(stem)
+    if not m:
+        return datetime.now()
+
+    date_part = m.group("date")
+    time_part = m.group("time").replace("-", ":")
+
+    try:
+        return datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return datetime.now()
+
+
+def _normalize_word(word: str) -> str:
+    """Remove pontuação e converte para minúsculas sem acento para comparação limpa."""
+    w = word.strip().lower()
+    w = re.sub(r"^[^\w]+|[^\w]+$", "", w)
+    nfkd = unicodedata.normalize("NFKD", w)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def triage_route_from_text(transcript: str) -> Route:
+    """Classifica a rota pela primeira palavra dita no áudio:
+    - 'diario' / 'diários' -> Route.DIARIO
+    - 'planejamento' / 'planejar' -> Route.PLANEJAMENTO
+    - qualquer outra palavra -> Route.INBOX (nota avulsa)
+    """
+    if not transcript or not transcript.strip():
         return Route.INBOX
-    first = tag[0].lower()
-    if first == "d":
+
+    words = transcript.strip().split()
+    if not words:
+        return Route.INBOX
+
+    first_word = _normalize_word(words[0])
+
+    if first_word in ("diario", "diarios"):
         return Route.DIARIO
-    if first == "p":
+    elif first_word in ("planejamento", "planejar", "planejamentos"):
         return Route.PLANEJAMENTO
     return Route.INBOX
 
+
+def triage(filename: str, transcript: str = "") -> Triage:
+    """Realiza a triagem combinando o timestamp do arquivo e a rota pelo conteúdo falado."""
+    recorded_at = triage_from_filename(filename)
+    route = triage_route_from_text(transcript)
+    return Triage(route=route, recorded_at=recorded_at, tag=route.value)

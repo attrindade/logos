@@ -25,23 +25,26 @@ def process_file(path: Path, ledger: Ledger) -> None:
         logger.debug(f"Já processado (ledger): {path.name}")
         return
 
-    t = triage(path.name)
     existing = ledger.get(path.name, size)
 
     if existing is not None and existing.state == State.TRANSCRIBED and existing.transcript_path:
         # Retomando após queda entre transcrição e enriquecimento — não retranscreve.
         transcript_path = Path(existing.transcript_path)
         transcript = transcript_path.read_text(encoding="utf-8")
+        t = triage(path.name, transcript)
     else:
         try:
             transcript = transcribe_file(path)
         except Exception as e:
+            t_initial = triage(path.name)
             logger.error(f"Falha na transcrição de {path.name}: {e}")
             ledger.upsert(Entry(
                 filename=path.name, size=size, state=State.FAILED,
-                route=t.route.value, recorded_at=t.recorded_at.isoformat(), error=str(e),
+                route=t_initial.route.value, recorded_at=t_initial.recorded_at.isoformat(), error=str(e),
             ))
             return
+
+        t = triage(path.name, transcript)
 
         config.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         transcript_name = f"{t.recorded_at.strftime('%Y-%m-%d_%H-%M-%S')}_{t.route.value}.txt"
