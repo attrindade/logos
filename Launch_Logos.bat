@@ -1,4 +1,5 @@
 @echo off
+setlocal
 cd /d "%~dp0"
-start "" "%~dp0.venv\Scripts\pythonw.exe" main.py
+start "" "%~dp0.venv\Scripts\python.exe" main.py
 exit

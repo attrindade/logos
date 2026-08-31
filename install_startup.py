@@ -15,19 +15,26 @@ def _install_windows():
 
     startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
     startup_dir.mkdir(parents=True, exist_ok=True)
+    dest_vbs = startup_dir / "Logos.vbs"
     dest_bat = startup_dir / "Logos.bat"
-    source_bat = BASE_DIR / "Launch_Logos.bat"
 
-    if not source_bat.exists():
-        # Create default Launch_Logos.bat if missing
-        pythonw = BASE_DIR / ".venv" / "Scripts" / "pythonw.exe"
-        if not pythonw.exists():
-            pythonw = "pythonw"
-        content = f'@echo off\ncd /d "%~dp0"\nstart "" "{pythonw}" main.py\nexit\n'
-        source_bat.write_text(content, encoding="utf-8")
+    # Remove bat antigo se existir para evitar execução duplicada
+    if dest_bat.exists():
+        dest_bat.unlink()
 
-    shutil.copy2(source_bat, dest_bat)
-    print(f"[OK] Windows startup entry created:\n     {dest_bat}")
+    python_exe = BASE_DIR / ".venv" / "Scripts" / "pythonw.exe"
+    if not python_exe.exists():
+        python_exe = BASE_DIR / ".venv" / "Scripts" / "python.exe"
+        if not python_exe.exists():
+            python_exe = Path(sys.executable)
+
+    # Cria script VBS que inicia o processo de forma 100% silenciosa sem popup de console
+    vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
+WshShell.CurrentDirectory = "{BASE_DIR}"
+WshShell.Run """{python_exe}"" ""{BASE_DIR / 'main.py'}""", 0, False
+'''
+    dest_vbs.write_text(vbs_content, encoding="utf-8")
+    print(f"[OK] Windows startup entry created:\n     {dest_vbs}")
     return True
 
 
@@ -35,11 +42,19 @@ def _uninstall_windows():
     appdata = os.getenv("APPDATA")
     if not appdata:
         return False
-    dest_bat = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Logos.bat"
+    startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    dest_vbs = startup_dir / "Logos.vbs"
+    dest_bat = startup_dir / "Logos.bat"
+    removed = False
+    if dest_vbs.exists():
+        dest_vbs.unlink()
+        print(f"[OK] Removed from Windows Startup: {dest_vbs}")
+        removed = True
     if dest_bat.exists():
         dest_bat.unlink()
         print(f"[OK] Removed from Windows Startup: {dest_bat}")
-    else:
+        removed = True
+    if not removed:
         print("No startup entry found to remove.")
     return True
 
