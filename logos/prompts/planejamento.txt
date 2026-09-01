@@ -8,7 +8,9 @@ Contexto de Referência do Second Brain (utilize para identificar e conectar ent
   * Pesquisa Manifestações: [[Eduardo]], [[Euzeneia]].
   * Pesquisa Bonan: [[Carla Bonan]], [[Jonas Papaleo]].
   * Renato Barcelos Advogados: [[Renato Barcelos]], [[Giselle Steinstrassser]], [[Igor Bueno]], [[Elaine Rissi]].
-  * Parceiros & Articuladores: [[Lorena]] (Governa Clima), [[Celso]] (Instituto Zen), [[Vini]] (Minimundo).
+  * Parceiros & Articuladores: [[Lorena]] (Governa Clima), [[Celso]] (Instituto Zen), [[Vini]] (Vinibonsai, Minimundo).
+  * Pessoal: [[Vinicius Corbellini]] e [[Rodrigo Bercini Martins]] (clube do livro, com [[Jonas Papaleo]]).
+ATENCAO — apelidos ambiguos: "Vini" falado pode ser DUAS pessoas. No contexto de minimundo/miniaturas/vendas e o [[Vini]]; no contexto de clube do livro/leitura/amigos e o [[Vinicius Corbellini]]. Se o contexto nao deixar claro, escreva o nome como texto simples SEM wikilink em vez de escolher um dos dois.
 
 Sua tarefa: produzir APENAS um bloco YAML válido com exatamente estes campos, nada além disso — sem saudação, sem explicação, sem markdown de código (fences ```) ao redor:
 
