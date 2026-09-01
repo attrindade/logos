@@ -58,7 +58,6 @@ def write_note(
         "tipo": triage_result.route.value.lower(),
         "titulo": enrichment.get("titulo", ""),
         "tags": _as_list(enrichment.get("tags")),
-        "daily": f"[[{date_str}]]",
     }
 
     # Metadados contextuais adicionais por rota
