@@ -32,7 +32,7 @@ Regras e Inferência de Entidades:
 - Use aspas duplas em todos os campos de texto escalar (titulo, humor, resumo).
 - Use listas com traço (- "[[Nome]]") para pessoas e projetos, SEMPRE com aspas duplas nas strings.
 - Conexão e Inferência Ativa: Sempre que uma pessoa for mencionada, inclua ela e também infira/adicione o projeto correspondente na lista de projetos (ex: se citou Jonas -> inclua [[pesq-bonan]]). Da mesma forma, se citou um projeto (ex: manifestações) -> inclua o projeto [[pesq-manifestacao]] e as pessoas relacionadas ([[Eduardo]], [[Euzeneia]]).
-- Use [[Wikilinks]] nas menções a pessoas, projetos, times e ferramentas nas frases e nas listas de entidades.
+- Use [[Wikilinks]] APENAS para entidades que constam no Contexto de Referência acima (pessoas, projetos e times). NUNCA crie wikilink para ferramentas, tecnologias ou conceitos genéricos — escreva Whisper, Windows, inteligência artificial, manifestações como texto simples. Um wikilink para algo que não está na lista aponta para uma nota que não existe e polui o grafo do vault.
 - Não invente fatos que não foram ditos.
 - Não dê conselhos nem terapia — apenas organize e estruture com fidelidade.
 - Se a transcrição for vazia ou mero ruído, retorne os campos vazios ou mínimos.
