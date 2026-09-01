@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "om": {
+      "command": "node",
+      "args": [
+        "C:/Workspace/notes/.claude/scripts/om-mcp.mjs"
+      ]
+    }
+  }
+}
