@@ -1,0 +1,17 @@
+"""Isola os testes dos dados reais.
+
+Precisa rodar antes de qualquer `import logos...`: `logos.status` instancia um StatusTracker
+no import e gravaria o status.json de produção (lido pelo DevPortal). As variáveis de ambiente
+têm precedência sobre o logos_config.yaml em `logos/config.py`.
+"""
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="logos-tests-"))
+os.environ["LOGOS_DATA_ROOT"] = str(_TEST_ROOT)
+os.environ["LOGOS_INBOX_DIR"] = str(_TEST_ROOT / "Inbox")
+os.environ["LOGOS_NOTES_DIR"] = str(_TEST_ROOT / "Notes")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
