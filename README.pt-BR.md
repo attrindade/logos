@@ -66,7 +66,10 @@ Manutenção: `python main.py --limpar-fantasmas` remove do ledger as falhas dei
 
 O Logos iniciará o processo residente (*watcher*):
 1. Faz varredura da pasta `Inbox/` inicial e retoma pendências se houver.
-2. Monitora a chegada de novas gravações continuamente.
+2. Monitora a chegada de novas gravações e de notas de texto `.txt`/`.md` continuamente. Texto pula o Whisper; arquivo sem nome `AAAA-MM-DD HH-MM-SS` é datado pelo horário de modificação.
+   - **Vocabulário de rotas:** a primeira palavra escolhe a rota (`diário`, `planejamento`, qualquer outra → Inbox). Na Inbox, `tarefa`, `ideia` e `reunião` preenchem `categoria` por regra, e `tarefa urgente` define `prioridade: alta`.
+   - **Frontmatter:** toda nota registra `fonte_tipo` (`audio`, `texto`) e `canal` (`syncthing`, ou `telegram` para arquivos `… tg.<ext>`).
+   - **ActivityWatch:** cada captura concluída posta um evento `logos.capture` no bucket `aw-watcher-logos_<hostname>` (`{rota, canal, tipo, duracao_audio_s, processamento_s}`); ignorado em silêncio se o `:5600` não responder.
 3. Transcreve com Whisper e salva o texto integral verbatim em `Transcripts/`.
 4. Envia para a LLM local gerar resumo estruturado, pontos principais e tags em YAML.
 5. Grava a nota final categorizada em `Notes/{Diario, Planejamento, Inbox}/`.
@@ -123,5 +126,6 @@ whisper_language: "pt"
 ollama_host: "http://localhost:11434"
 ollama_keep_alive: "10m"   # mantém o modelo carregado entre notas
 llm_model: "gemma4:e4b"    # opcional: gemma4:26b
+llm_min_words: 40          # notas mais curtas pulam a LLM (título = 8 primeiras palavras)
 archive_retention_days: 60
 ```

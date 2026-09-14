@@ -31,7 +31,7 @@ def main():
         t = triage(f.name)
         t0 = time.time()
         try:
-            text = transcribe_file(f)
+            text = transcribe_file(f).text
         except Exception as e:
             print(f"[FAIL] {f.name}: {e}")
             ledger.upsert(Entry(

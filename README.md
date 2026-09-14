@@ -71,7 +71,10 @@ Only one watcher runs at a time: `main.py` holds `state/logos.lock` with its PID
 Maintenance: `python main.py --limpar-fantasmas` removes ledger failures left by partial syncs of a file whose complete version was already processed (a backup of `ledger.json` is written first).
 
 ### What happens in the pipeline:
-1. **Inbox Scan & Watcher:** Detects incoming voice recordings while ensuring write stability.
+1. **Inbox Scan & Watcher:** Detects incoming voice recordings and `.txt`/`.md` text notes while ensuring write stability. Text skips Whisper; files without a `YYYY-MM-DD HH-MM-SS` name are dated by modification time.
+   - **Route vocabulary:** the first word picks the route (`diário`, `planejamento`, anything else → Inbox). In Inbox, `tarefa`, `ideia` and `reunião` set `categoria` by rule, and `tarefa urgente` sets `prioridade: alta`.
+   - **Frontmatter:** every note records `fonte_tipo` (`audio`, `texto`) and `canal` (`syncthing`, or `telegram` for files named `… tg.<ext>`).
+   - **ActivityWatch:** each finished capture posts a `logos.capture` event to bucket `aw-watcher-logos_<hostname>` (`{rota, canal, tipo, duracao_audio_s, processamento_s}`); silently skipped if `:5600` is down.
 2. **STT (Whisper):** Transcribes audio directly to raw verbatim text saved in `Transcripts/`.
 3. **LLM Enrichment:** Prompts Ollama with route-specific prompts (`Diario`, `Planejamento`, `Inbox`) to generate clean YAML frontmatter, titles, tags, summaries, and action points.
 4. **Vault Writer:** Produces the final Markdown note in `Notes/{Diario, Planejamento, Inbox}/` with the full verbatim transcript preserved.
@@ -128,5 +131,6 @@ whisper_language: "pt"
 ollama_host: "http://localhost:11434"
 ollama_keep_alive: "10m"   # keeps the model loaded between notes
 llm_model: "gemma4:e4b"    # optional: gemma4:26b
+llm_min_words: 40          # shorter notes skip the LLM (title = first 8 words)
 archive_retention_days: 60
 ```

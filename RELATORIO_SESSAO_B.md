@@ -60,5 +60,40 @@ Get-Content $HOME\Logos\logs\watcher.log -Tail 5
 
 ### Pendente
 
-- Relançar o watcher (acima).
+- Relançar o watcher (acima). **Recomendado fazer uma vez só, depois da Etapa 2**: o processo atual não carregou nem a Etapa 1.
 - `bench/`: medir o efeito do `keep_alive` é da sessão D.
+
+## Etapa 2 · Texto e vocabulário de rotas (2026-09-14)
+
+### O que mudou
+
+| Item | Mudança |
+|---|---|
+| Texto na Inbox | `.txt` e `.md` pulam o Whisper (`utf-8-sig`, tolera BOM). Continuam gravando cópia em `Transcripts/`, estado `transcribed` no ledger e cópia no `Archive/`, para o fluxo de retomada ficar igual ao do áudio. Nome fora do padrão `YYYY-MM-DD HH-MM-SS` usa o `mtime`. |
+| Estabilidade | Texto confirma em 1 s (uma leitura estável); áudio mantém os valores do config. O laço deixou de dormir depois da última leitura estável (áudio: 15 s → 10 s com os mesmos 2 checks). |
+| **Bug encontrado** | O watcher não tratava `on_moved`. Arquivo que chega por renomeação de temporário (como o bot vai gravar) nunca era processado até o próximo reinício. Corrigido e coberto por `tests/test_watcher_events.py`. |
+| Frontmatter | `fonte_tipo: audio|texto` e `canal: syncthing|telegram`. `modelo_stt` só em áudio; `modelo_llm` omitido quando a nota pula a LLM. Seção final vira "Texto Original" para texto. |
+| Canal | Derivado do nome: sufixo ` tg` (`2026-09-14 15-02-11 tg.txt`, `… tg.oga`) → `telegram`. **Desvio consciente do texto da Etapa 3**, que dizia `YYYY-MM-DD HH-MM-SS.txt`: sem o sufixo o pipeline não tem como saber a origem sem um segundo registro de estado. O mesmo sufixo casa com os pacotes `… tg/` da Etapa 4. |
+| Vocabulário | Rota Inbox + primeira palavra `tarefa`, `ideia`, `reunião` (com ou sem acento e pontuação) preenche `categoria`; `tarefa urgente` → `prioridade: alta`. A regra prevalece sobre o que a LLM devolver. A palavra-chave não é removida do texto (o título de "tarefa urgente testar o bot" é essa frase). |
+| Notas curtas | Menos de `llm_min_words` (40) palavras: sem LLM, título = 8 primeiras palavras, resumo = texto. Vale também para áudio curto. Configurável em `logos_config.yaml` (gitignored, já atualizado aqui) e no `setup.py`. |
+| `logos/aw.py` | Evento `logos.capture` no bucket `aw-watcher-logos_att` com `{rota, canal, tipo, duracao_audio_s, processamento_s}`, `timestamp` = início do processamento em UTC, `duration` = processamento. **Usa a API REST com `requests` e timeout de 2 s em vez do `aw-client`**: o `ActivityWatchClient._post` não define timeout, e um servidor pendurado travaria o pipeline. O bucket e o formato combinados com a sessão C são os mesmos. `stt.transcribe_file` agora devolve `Transcription(text, duration_s)`; `bench/run_stt.py` foi ajustado. |
+| Isolamento | `conftest.py` aponta o AW para a porta 1: os testes que rodam `process_file` de verdade não postam capturas falsas no bucket que a sessão C lê. |
+
+### Verificação
+
+- `pytest`: 48 passed.
+- Ponta a ponta com `main.py` real contra Inbox/notas temporárias (AW desligado): `tarefa urgente testar o bot` gravado como `2026-09-14 15-02-11 tg.txt` por temporário + rename virou nota em **1,1 s**, com `fonte_tipo: texto`, `canal: telegram`, `categoria: tarefa`, `prioridade: alta`. Escrita direta de `ideia direta.txt`: **3,0 s**. A segunda instância saiu em 0,2 s com o aviso do lock, que gravou o PID do processo filho, não o do lançador.
+- O critério na pasta real (`capturas/Inbox/` em menos de 10 s) depende do relançamento. Depois de relançar:
+
+```powershell
+Set-Content -Encoding utf8 "$HOME\Logos\Inbox\teste logos.txt" "ideia testar a entrada de texto do logos"
+# em ~3 s:
+Get-ChildItem C:\Workspace\notes\capturas\Inbox | Sort-Object LastWriteTime | Select-Object -Last 1
+curl.exe -s "http://127.0.0.1:5600/api/0/buckets/aw-watcher-logos_att/events?limit=1"
+```
+
+Use `Set-Content -Encoding utf8` ou o PowerShell 7: o `>` do Windows PowerShell 5.1 grava UTF-16. O arquivo criado à mão na Inbox aparece no Syncthing como "alteração local" da pasta receive-only; é inofensivo, mas **"Revert local changes" apaga arquivos adicionados localmente**.
+
+### Pendente
+
+- Relançar o watcher (comandos da Etapa 1) e rodar o teste acima.

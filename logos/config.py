@@ -67,6 +67,14 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX") or _user_cfg.get("ollama_num_ct
 OLLAMA_KEEP_ALIVE = str(os.getenv("OLLAMA_KEEP_ALIVE") or _user_cfg.get("ollama_keep_alive", "10m"))
 LLM_MODEL = os.getenv("LLM_MODEL") or _user_cfg.get("llm_model", "gemma4:e4b")
 CHUNK_TOKEN_THRESHOLD = int(os.getenv("CHUNK_TOKEN_THRESHOLD") or _user_cfg.get("chunk_token_threshold", 6500))
+# Abaixo disso a nota pula a LLM: título das primeiras palavras e resumo = texto.
+LLM_MIN_WORDS = int(os.getenv("LLM_MIN_WORDS") or _user_cfg.get("llm_min_words", 40))
+
+# ---------------------------------------------------------
+# ActivityWatch (evento por captura; ignorado se o servidor não responder)
+# ---------------------------------------------------------
+AW_HOST = os.getenv("LOGOS_AW_HOST") or _user_cfg.get("aw_host", "127.0.0.1")
+AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
 
 # ---------------------------------------------------------
 # Retenção e Políticas

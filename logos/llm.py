@@ -84,6 +84,15 @@ def _strip_yaml_fences(raw: str) -> str:
     return m.group(1).strip() if m else raw
 
 
+def short_enrichment(text: str) -> dict:
+    """Nota curta sem LLM: título das primeiras 8 palavras, resumo = texto."""
+    words = text.split()
+    if not words:
+        return {"titulo": "Sem conteúdo", "tags": [], "resumo": ""}
+    titulo = " ".join(words[:8]).rstrip(".,;:!?…-— ")
+    return {"titulo": titulo, "tags": [], "resumo": text.strip()}
+
+
 def enrich(transcript: str, route: Route, model: str = None) -> dict:
     """Retorna um dict com os campos do YAML gerado pela LLM. Nunca lança se o parse
     falhar — devolve um dict de fallback com o texto bruto, para não travar o pipeline."""

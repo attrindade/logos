@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from logos import config
 from logos.ledger import Entry, Ledger, State
 from logos.pipeline import process_file, retry_failed
+from logos.stt import Transcription
 
 
 def check(cond, msg):
@@ -57,7 +58,7 @@ def main():
     ))
     results.append(check(not ledger.is_processed(dst.name, size), "FAILED não conta como processado"))
 
-    with patch("logos.pipeline.transcribe_file", return_value="Texto de teste transcrito."), \
+    with patch("logos.pipeline.transcribe_file", return_value=Transcription("Texto de teste transcrito.", 0.5)), \
          patch("logos.pipeline.enrich", return_value={"titulo": "Teste", "tags": ["teste"], "resumo": "Resumo de teste"}):
         retry_failed(ledger)
 
@@ -68,7 +69,7 @@ def main():
 
     # rodar de novo: não deve reprocessar (idempotência pós-sucesso)
     note_mtime_before = Path(entry.note_path).stat().st_mtime
-    with patch("logos.pipeline.transcribe_file", return_value="Texto de teste transcrito."), \
+    with patch("logos.pipeline.transcribe_file", return_value=Transcription("Texto de teste transcrito.", 0.5)), \
          patch("logos.pipeline.enrich", return_value={"titulo": "Teste", "tags": ["teste"], "resumo": "Resumo de teste"}):
         process_file(dst, ledger)
         

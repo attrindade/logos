@@ -19,11 +19,31 @@ _NAME_RE = re.compile(
 )
 
 
+TEXT_EXTENSIONS = {".txt", ".md"}
+
+# Primeira palavra que mantém a rota Inbox mas fixa a categoria por regra, sem depender da LLM.
+_CATEGORIAS = {
+    "tarefa": "tarefa", "tarefas": "tarefa",
+    "ideia": "ideia", "ideias": "ideia",
+    "reuniao": "reuniao", "reunioes": "reuniao",
+}
+
+# Sufixo no nome dos arquivos gravados pelo bot: "2026-09-14 15-02-11 tg.txt".
+TELEGRAM_TAG = "tg"
+
+
 @dataclass(frozen=True)
 class Triage:
     route: Route
     recorded_at: datetime
     tag: str
+    categoria: str = ""
+    prioridade: str = ""
+    canal: str = "syncthing"
+
+
+def is_text_file(filename) -> bool:
+    return Path(str(filename)).suffix.lower() in TEXT_EXTENSIONS
 
 
 def is_ignored(filename: str) -> bool:
@@ -44,15 +64,17 @@ def _strip_evr_prefix(stem: str) -> str:
     return m.group("rest") if m else stem
 
 
-def triage_from_filename(filename: str) -> datetime:
-    """Extrai o timestamp de gravação a partir do nome do arquivo."""
+def _name_match(filename) -> re.Match | None:
     name = Path(filename).name if isinstance(filename, Path) else str(filename)
-    stem = _strip_extension(name)
-    stem = _strip_evr_prefix(stem)
+    return _NAME_RE.match(_strip_evr_prefix(_strip_extension(name)))
 
-    m = _NAME_RE.match(stem)
+
+def triage_from_filename(filename: str, fallback: datetime | None = None) -> datetime:
+    """Extrai o timestamp de gravação a partir do nome do arquivo. Se o nome não seguir o
+    padrão, usa `fallback` (o pipeline passa o mtime do arquivo) ou a hora atual."""
+    m = _name_match(filename)
     if not m:
-        return datetime.now()
+        return fallback or datetime.now()
 
     date_part = m.group("date")
     time_part = m.group("time").replace("-", ":")
@@ -60,7 +82,13 @@ def triage_from_filename(filename: str) -> datetime:
     try:
         return datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
     except ValueError:
-        return datetime.now()
+        return fallback or datetime.now()
+
+
+def canal_from_filename(filename) -> str:
+    m = _name_match(filename)
+    tag = (m.group("tag") or "").strip().lower() if m else ""
+    return "telegram" if tag == TELEGRAM_TAG else "syncthing"
 
 
 def _normalize_word(word: str) -> str:
@@ -93,8 +121,25 @@ def triage_route_from_text(transcript: str) -> Route:
     return Route.INBOX
 
 
-def triage(filename: str, transcript: str = "") -> Triage:
+def triage_category_from_text(transcript: str) -> tuple[str, str]:
+    """(categoria, prioridade) pela primeira palavra: 'tarefa', 'ideia' ou 'reunião'.
+    'tarefa urgente ...' ganha prioridade alta."""
+    words = (transcript or "").split()
+    if not words:
+        return "", ""
+    categoria = _CATEGORIAS.get(_normalize_word(words[0]), "")
+    prioridade = ""
+    if categoria == "tarefa" and len(words) > 1 and _normalize_word(words[1]) == "urgente":
+        prioridade = "alta"
+    return categoria, prioridade
+
+
+def triage(filename: str, transcript: str = "", fallback: datetime | None = None) -> Triage:
     """Realiza a triagem combinando o timestamp do arquivo e a rota pelo conteúdo falado."""
-    recorded_at = triage_from_filename(filename)
+    recorded_at = triage_from_filename(filename, fallback)
     route = triage_route_from_text(transcript)
-    return Triage(route=route, recorded_at=recorded_at, tag=route.value)
+    categoria, prioridade = triage_category_from_text(transcript) if route == Route.INBOX else ("", "")
+    return Triage(
+        route=route, recorded_at=recorded_at, tag=route.value,
+        categoria=categoria, prioridade=prioridade, canal=canal_from_filename(filename),
+    )

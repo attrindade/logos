@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from faster_whisper import WhisperModel
@@ -93,8 +94,14 @@ def extract_audio_to_wav(input_path: Path) -> Path:
     return tmp_wav
 
 
-def transcribe_file(input_path: Path) -> str:
-    """Transcreve um arquivo de áudio/vídeo e retorna o texto concatenado."""
+@dataclass(frozen=True)
+class Transcription:
+    text: str
+    duration_s: float
+
+
+def transcribe_file(input_path: Path) -> Transcription:
+    """Transcreve um arquivo de áudio/vídeo e retorna o texto concatenado e a duração."""
     wav_path = extract_audio_to_wav(input_path)
     try:
         model = get_model()
@@ -105,7 +112,7 @@ def transcribe_file(input_path: Path) -> str:
             vad_filter=config.WHISPER_VAD_FILTER,
         )
         text = "".join(segment.text for segment in segments)
-        return text.strip()
+        return Transcription(text=text.strip(), duration_s=round(float(info.duration), 2))
     finally:
         try:
             if wav_path.exists():

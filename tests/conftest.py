@@ -13,5 +13,7 @@ _TEST_ROOT = Path(tempfile.mkdtemp(prefix="logos-tests-"))
 os.environ["LOGOS_DATA_ROOT"] = str(_TEST_ROOT)
 os.environ["LOGOS_INBOX_DIR"] = str(_TEST_ROOT / "Inbox")
 os.environ["LOGOS_NOTES_DIR"] = str(_TEST_ROOT / "Notes")
+# Porta fechada: process_file real nos testes não pode postar capturas falsas no ActivityWatch.
+os.environ["LOGOS_AW_PORT"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

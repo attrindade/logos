@@ -42,6 +42,7 @@ def write_note(
     transcript: str,
     enrichment: dict,
     llm_model: str,
+    fonte_tipo: str = "audio",
 ) -> Path:
     route_dir = config.NOTES_DIR / triage_result.route.value
     route_dir.mkdir(parents=True, exist_ok=True)
@@ -63,12 +64,15 @@ def write_note(
     # Metadados contextuais adicionais por rota
     if enrichment.get("humor"):
         frontmatter["humor"] = enrichment.get("humor")
-    if enrichment.get("prioridade"):
-        frontmatter["prioridade"] = enrichment.get("prioridade")
+    # categoria/prioridade vindas da primeira palavra (regra) prevalecem sobre a LLM
+    prioridade = triage_result.prioridade or enrichment.get("prioridade")
+    if prioridade:
+        frontmatter["prioridade"] = prioridade
     if enrichment.get("status"):
         frontmatter["status"] = enrichment.get("status")
-    if enrichment.get("categoria"):
-        frontmatter["categoria"] = enrichment.get("categoria")
+    categoria = triage_result.categoria or enrichment.get("categoria")
+    if categoria:
+        frontmatter["categoria"] = categoria
 
     # Relações de entidades do Second Brain
     pessoas = _as_list(enrichment.get("pessoas"))
@@ -80,8 +84,11 @@ def write_note(
         frontmatter["projetos"] = projetos
 
     frontmatter["fonte"] = source_filename
-    frontmatter["modelo_stt"] = config.WHISPER_MODEL_SIZE
-    frontmatter["modelo_llm"] = llm_model
+    frontmatter["fonte_tipo"] = fonte_tipo
+    frontmatter["canal"] = triage_result.canal
+    if fonte_tipo == "audio":
+        frontmatter["modelo_stt"] = config.WHISPER_MODEL_SIZE
+    frontmatter["modelo_llm"] = llm_model  # vazio (omitido) quando a nota curta pula a LLM
 
     body_parts = [_yaml_frontmatter(frontmatter), ""]
 
@@ -139,7 +146,10 @@ def write_note(
         body_parts += ["## 📝 Resumo", resumo, ""]
 
     # Transcrição Verbatim Integral Intocada
-    body_parts += ["---", "## 🎙️ Transcrição Original", "", transcript if transcript.strip() else "*(sem fala detectada)*"]
+    if fonte_tipo == "texto":
+        body_parts += ["---", "## ✍️ Texto Original", "", transcript if transcript.strip() else "*(vazio)*"]
+    else:
+        body_parts += ["---", "## 🎙️ Transcrição Original", "", transcript if transcript.strip() else "*(sem fala detectada)*"]
 
     # ---------------------------------------------------------
     # 3. Nome de Arquivo Human-Readable para o Obsidian

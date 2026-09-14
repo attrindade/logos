@@ -14,9 +14,11 @@ from . import config
 from .ledger import Entry, Ledger, State
 from .pipeline import process_file, retry_failed
 from .status import PipelineStage, tracker
-from .triage import is_ignored
+from .triage import is_ignored, is_text_file
 
 logger = logging.getLogger(__name__)
+
+TEXT_STABILITY_INTERVAL_S = 1
 
 
 def _set_low_priority():
@@ -35,10 +37,18 @@ def _set_low_priority():
 
 
 def _wait_for_stable_file(path: Path) -> bool:
-    """Confirma que o arquivo parou de ser escrito antes de enfileirar."""
+    """Confirma que o arquivo parou de ser escrito antes de enfileirar.
+
+    Texto chega completo (Syncthing e o bot gravam em temporário e renomeiam) e é pequeno:
+    uma confirmação em 1 s basta. Áudio mantém a espera configurada."""
+    if is_text_file(path.name):
+        interval, count = TEXT_STABILITY_INTERVAL_S, 1
+    else:
+        interval, count = config.STABILITY_CHECK_INTERVAL_S, config.STABILITY_CHECK_COUNT
+
     last_size = -1
     stable_reads = 0
-    while stable_reads < config.STABILITY_CHECK_COUNT:
+    while True:
         try:
             size = path.stat().st_size
         except FileNotFoundError:
@@ -54,9 +64,11 @@ def _wait_for_stable_file(path: Path) -> bool:
             filename=path.name,
             file_size=size,
             message="Sincronizando / validando estabilidade na Inbox...",
-            details=f"Verificação {stable_reads}/{config.STABILITY_CHECK_COUNT} ({round(size / 1024, 1)} KB)",
+            details=f"Verificação {stable_reads}/{count} ({round(size / 1024, 1)} KB)",
         )
-        time.sleep(config.STABILITY_CHECK_INTERVAL_S)
+        if stable_reads >= count:
+            break
+        time.sleep(interval)
 
     try:
         with open(path, "rb"):
@@ -114,10 +126,16 @@ class _InboxHandler(FileSystemEventHandler):
     def on_modified(self, event):
         self._handle(event)
 
-    def _handle(self, event):
+    def on_moved(self, event):
+        # Syncthing e o bot gravam num temporário e renomeiam: a chegada é um "moved".
+        self._handle(event, Path(event.dest_path))
+
+    def _handle(self, event, path: Path | None = None):
         if event.is_directory:
             return
-        path = Path(event.src_path)
+        path = path or Path(event.src_path)
+        if path.parent != config.INBOX_DIR:
+            return  # renomeado para fora da Inbox
         if is_ignored(path.name):
             return
         if _wait_for_stable_file(path):

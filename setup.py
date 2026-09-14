@@ -245,6 +245,7 @@ def save_config(data_root: str, whisper_dir: str, whisper_size: str, llm_model: 
         "ollama_keep_alive": "10m",
         "llm_model": llm_model,
         "chunk_token_threshold": 6500,
+        "llm_min_words": 40,
         "archive_retention_days": 60,
         "stability_check_interval_s": 5,
         "stability_check_count": 2,
