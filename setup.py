@@ -246,6 +246,8 @@ def save_config(data_root: str, whisper_dir: str, whisper_size: str, llm_model: 
         "llm_model": llm_model,
         "chunk_token_threshold": 6500,
         "llm_min_words": 40,
+        "telegram_window_min": 10,
+        "ocr_langs": "por+eng",
         "archive_retention_days": 60,
         "stability_check_interval_s": 5,
         "stability_check_count": 2,

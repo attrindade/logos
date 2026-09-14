@@ -1,5 +1,6 @@
 """Configuração central do Logos com suporte a arquivo de configuração local e variáveis de ambiente."""
 import os
+import shutil
 from pathlib import Path
 import yaml
 
@@ -66,6 +67,11 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST") or _user_cfg.get("ollama_host", "http://l
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX") or _user_cfg.get("ollama_num_ctx", 8192))
 OLLAMA_KEEP_ALIVE = str(os.getenv("OLLAMA_KEEP_ALIVE") or _user_cfg.get("ollama_keep_alive", "10m"))
 LLM_MODEL = os.getenv("LLM_MODEL") or _user_cfg.get("llm_model", "gemma4:e4b")
+# Descrição de foto sem texto reconhecido pelo OCR. Vazio desliga (a variável vazia também vale).
+VISION_MODEL = (
+    os.environ["LOGOS_VISION_MODEL"] if "LOGOS_VISION_MODEL" in os.environ
+    else _user_cfg.get("vision_model", LLM_MODEL)
+)
 CHUNK_TOKEN_THRESHOLD = int(os.getenv("CHUNK_TOKEN_THRESHOLD") or _user_cfg.get("chunk_token_threshold", 6500))
 # Abaixo disso a nota pula a LLM: título das primeiras palavras e resumo = texto.
 LLM_MIN_WORDS = int(os.getenv("LLM_MIN_WORDS") or _user_cfg.get("llm_min_words", 40))
@@ -75,6 +81,33 @@ LLM_MIN_WORDS = int(os.getenv("LLM_MIN_WORDS") or _user_cfg.get("llm_min_words",
 # ---------------------------------------------------------
 AW_HOST = os.getenv("LOGOS_AW_HOST") or _user_cfg.get("aw_host", "127.0.0.1")
 AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
+
+# ---------------------------------------------------------
+# Telegram, anexos e OCR
+# ---------------------------------------------------------
+# Mensagens com menos que isso entre si formam um pacote (uma nota).
+TELEGRAM_WINDOW_MIN = float(os.getenv("LOGOS_TELEGRAM_WINDOW_MIN") or _user_cfg.get("telegram_window_min", 10))
+
+# Raiz do vault, para embeds com caminho completo. Padrão: pasta-mãe de notes_dir.
+_raw_vault_dir = os.getenv("LOGOS_VAULT_DIR") or _user_cfg.get("vault_dir")
+VAULT_DIR = Path(_raw_vault_dir).expanduser().resolve() if _raw_vault_dir else None
+
+
+def _find_tesseract() -> str:
+    configured = os.getenv("LOGOS_TESSERACT_CMD") or _user_cfg.get("tesseract_cmd")
+    if configured:
+        return str(configured)
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    default = Path(os.getenv("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe"
+    return str(default) if default.exists() else ""
+
+
+TESSERACT_CMD = _find_tesseract()
+_raw_tessdata_dir = os.getenv("LOGOS_TESSDATA_DIR") or _user_cfg.get("tessdata_dir")
+TESSDATA_DIR = Path(_raw_tessdata_dir).expanduser().resolve() if _raw_tessdata_dir else DATA_ROOT / "models" / "tessdata"
+OCR_LANGS = os.getenv("LOGOS_OCR_LANGS") or _user_cfg.get("ocr_langs", "por+eng")
 
 # ---------------------------------------------------------
 # Retenção e Políticas

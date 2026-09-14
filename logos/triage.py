@@ -85,6 +85,16 @@ def triage_from_filename(filename: str, fallback: datetime | None = None) -> dat
         return fallback or datetime.now()
 
 
+def is_bundle_name(name: str) -> bool:
+    """Pasta de pacote do bot: 'YYYY-MM-DD HH-MM-SS tg <message_id>'."""
+    return (
+        not is_ignored(name)
+        and Path(name).suffix == ""
+        and _NAME_RE.match(name) is not None
+        and canal_from_filename(name) == "telegram"
+    )
+
+
 def canal_from_filename(filename) -> str:
     m = _name_match(filename)
     words = (m.group("tag") or "").lower().split() if m else []

@@ -55,19 +55,18 @@ def _chunk_text(text: str, max_words: int) -> list[str]:
     return chunks
 
 
-def _ollama_generate(prompt: str, model: str = None, keep_alive: str = None) -> str:
+def _ollama_generate(prompt: str, model: str = None, keep_alive: str = None, images: list[str] | None = None) -> str:
     model = model or config.LLM_MODEL
-    resp = requests.post(
-        f"{config.OLLAMA_HOST}/api/generate",
-        json={
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"num_ctx": config.OLLAMA_NUM_CTX},
-            "keep_alive": keep_alive if keep_alive is not None else config.OLLAMA_KEEP_ALIVE,
-        },
-        timeout=600,
-    )
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_ctx": config.OLLAMA_NUM_CTX},
+        "keep_alive": keep_alive if keep_alive is not None else config.OLLAMA_KEEP_ALIVE,
+    }
+    if images:
+        payload["images"] = images  # base64, para modelos com visão
+    resp = requests.post(f"{config.OLLAMA_HOST}/api/generate", json=payload, timeout=600)
     resp.raise_for_status()
     return resp.json()["response"].strip()
 

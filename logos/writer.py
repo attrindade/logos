@@ -1,15 +1,18 @@
-"""Monta a nota .md final estruturada e enriquecida para o Obsidian e copia o áudio para Archive.
+"""Monta a nota .md final estruturada e enriquecida para o Obsidian, guarda anexos e copia o áudio para Archive.
 
 O transcrito verbatim é sempre preservado no corpo da nota, intocado — a LLM é aditiva, nunca destrutiva.
 """
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import yaml
 
 from . import config
 from .triage import Route, Triage
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
 
 
 def _yaml_frontmatter(fields: dict) -> str:
@@ -36,6 +39,108 @@ def _sanitize_filename(name: str) -> str:
     return s[:80] if s else "Nota"
 
 
+# ---------------------------------------------------------
+# Anexos (pacotes do Telegram)
+# ---------------------------------------------------------
+
+def _vault_root() -> Path:
+    return config.VAULT_DIR or config.NOTES_DIR.parent
+
+
+def vault_link(path: Path) -> str:
+    """Caminho relativo ao vault para wikilinks e embeds. O caminho completo evita que o Obsidian
+    confunda `X.pdf` com o sidecar `X.pdf.md`, cujo nome de nota é o mesmo `X.pdf`."""
+    try:
+        return Path(path).resolve().relative_to(_vault_root().resolve()).as_posix()
+    except ValueError:
+        return Path(path).name
+
+
+def _attachment_folder(recorded_at: datetime) -> Path:
+    return config.NOTES_DIR / "anexos" / f"{recorded_at:%Y}" / f"{recorded_at:%m}"
+
+
+def store_attachment(source: Path, recorded_at: datetime, n: int) -> Path:
+    """Copia o anexo para `anexos/YYYY/MM/YYYY-MM-DD_HH-MM-SS_n.<ext>`. Reaproveita a cópia de uma
+    tentativa anterior do mesmo pacote (mesmo tamanho); nome ocupado por outro arquivo ganha sufixo."""
+    folder = _attachment_folder(recorded_at)
+    folder.mkdir(parents=True, exist_ok=True)
+    stem, suffix = f"{recorded_at:%Y-%m-%d_%H-%M-%S}_{n}", source.suffix.lower()
+    dest, k = folder / f"{stem}{suffix}", 2
+    while dest.exists() and dest.stat().st_size != source.stat().st_size:
+        dest, k = folder / f"{stem}-{k}{suffix}", k + 1
+    if not dest.exists():
+        shutil.copy2(source, dest)
+    return dest
+
+
+def write_sidecar(attachment: Path, text: str) -> Path:
+    sidecar = attachment.with_name(f"{attachment.name}.md")
+    header = _yaml_frontmatter({"tipo": "sidecar", "anexo": vault_link(attachment)})
+    sidecar.write_text(f"{header}\n# Texto extraído de {attachment.name}\n\n{text.strip()}\n", encoding="utf-8")
+    return sidecar
+
+
+def write_link_sidecar(url: str, title: str, text: str, recorded_at: datetime, n: int) -> Path:
+    folder = _attachment_folder(recorded_at)
+    folder.mkdir(parents=True, exist_ok=True)
+    sidecar = folder / f"{recorded_at:%Y-%m-%d_%H-%M-%S}_{n}.link.md"
+    header = _yaml_frontmatter({"tipo": "sidecar", "url": url, "titulo": title})
+    sidecar.write_text(f"{header}\n# {title or url}\n\n<{url}>\n\n{text.strip()}\n", encoding="utf-8")
+    return sidecar
+
+
+def _map_line(local: dict) -> str:
+    lat, lon = local["lat"], local["lon"]
+    label = f"{lat}, {lon}" + (f" · {local['titulo']}" if local.get("titulo") else "")
+    return f"📍 [{label}](https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon})"
+
+
+def _attachment_lines(anexos: list[dict]) -> list[str]:
+    lines = []
+    for anexo in anexos:
+        if anexo.get("url"):
+            title = (anexo.get("titulo") or anexo["url"]).replace("[", "(").replace("]", ")")
+            line = f"- 🔗 [{title}]({anexo['url']})"
+            if anexo.get("sidecar"):
+                line += f" · [[{vault_link(anexo['sidecar'])}|artigo]]"
+            lines.append(line)
+            continue
+        link = vault_link(anexo["path"])
+        ext = Path(anexo["path"]).suffix.lower()
+        if ext in IMAGE_EXTS:
+            lines += [f"![[{link}|400]]", ""]
+        elif ext == ".pdf":
+            lines += [f"![[{link}#page=1]]", ""]
+        else:
+            lines.append(f"- [[{link}]]")
+        if anexo.get("sidecar"):
+            lines.append(f"- Texto extraído: [[{vault_link(anexo['sidecar'])}]]")
+    return lines
+
+
+def _attachment_paths(anexos: list[dict]) -> list[str]:
+    paths = []
+    for anexo in anexos:
+        target = anexo.get("sidecar") if anexo.get("url") else anexo.get("path")
+        if target:
+            paths.append(vault_link(target))
+    return paths
+
+
+def append_to_note(note_path: Path, anexos: list[dict], transcript: str, recorded_at: datetime, local: dict | None = None) -> None:
+    """Resposta a uma mensagem que já virou nota: acrescenta uma seção ao fim, sem tocar no
+    frontmatter (que pode ter sido editado à mão ou por outro processo)."""
+    parts = ["", "", f"## 📎 Resposta de {recorded_at:%Y-%m-%d %H:%M}", ""]
+    parts += _attachment_lines(anexos)
+    if local:
+        parts.append(_map_line(local))
+    if transcript.strip():
+        parts += ["", transcript.strip()]
+    with open(note_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(parts) + "\n")
+
+
 def write_note(
     source_filename: str,
     triage_result: Triage,
@@ -43,7 +148,10 @@ def write_note(
     enrichment: dict,
     llm_model: str,
     fonte_tipo: str = "audio",
+    anexos: list[dict] | None = None,
+    local: dict | None = None,
 ) -> Path:
+    anexos = anexos or []
     route_dir = config.NOTES_DIR / triage_result.route.value
     route_dir.mkdir(parents=True, exist_ok=True)
 
@@ -82,6 +190,11 @@ def write_note(
     projetos = _as_list(enrichment.get("projetos"))
     if projetos:
         frontmatter["projetos"] = projetos
+
+    if anexos:
+        frontmatter["anexos"] = _attachment_paths(anexos)
+    if local:
+        frontmatter["local"] = f"{local['lat']}, {local['lon']}"
 
     frontmatter["fonte"] = source_filename
     frontmatter["fonte_tipo"] = fonte_tipo
@@ -145,11 +258,20 @@ def write_note(
     if resumo:
         body_parts += ["## 📝 Resumo", resumo, ""]
 
+    # Anexos embutidos (pacotes do Telegram)
+    if anexos or local:
+        body_parts += ["## 📎 Anexos", *_attachment_lines(anexos)]
+        if local:
+            body_parts.append(_map_line(local))
+        body_parts.append("")
+
     # Transcrição Verbatim Integral Intocada
-    if fonte_tipo == "texto":
-        body_parts += ["---", "## ✍️ Texto Original", "", transcript if transcript.strip() else "*(vazio)*"]
-    else:
-        body_parts += ["---", "## 🎙️ Transcrição Original", "", transcript if transcript.strip() else "*(sem fala detectada)*"]
+    headings = {
+        "texto": ("## ✍️ Texto Original", "*(vazio)*"),
+        "pacote": ("## 💬 Mensagens", "*(sem texto)*"),
+    }
+    heading, empty = headings.get(fonte_tipo, ("## 🎙️ Transcrição Original", "*(sem fala detectada)*"))
+    body_parts += ["---", heading, "", transcript if transcript.strip() else empty]
 
     # ---------------------------------------------------------
     # 3. Nome de Arquivo Human-Readable para o Obsidian

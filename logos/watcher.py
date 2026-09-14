@@ -1,5 +1,7 @@
-"""Observa Inbox continuamente, valida estabilidade de escrita, processa e expira Archive
-. NUNCA escreve, move ou apaga nada dentro de Inbox."""
+"""Observa Inbox continuamente, valida estabilidade de escrita, processa e expira Archive.
+
+O watcher NUNCA escreve, move ou apaga nada dentro de Inbox. Só o bot Telegram (thread neste
+mesmo processo) entrega arquivos e pacotes novos, sempre por rename de algo já completo."""
 import logging
 import os
 import sys
@@ -13,14 +15,15 @@ from watchdog.observers import Observer
 
 from . import config
 from .ledger import Entry, Ledger, State
-from .pipeline import process_file, retry_failed
+from .pipeline import process_bundle, process_file, read_manifest, retry_failed
 from .status import PipelineStage, tracker
 from .telegram import start_bot_thread
-from .triage import is_ignored, is_text_file
+from .triage import is_bundle_name, is_ignored, is_text_file
 
 logger = logging.getLogger(__name__)
 
 TEXT_STABILITY_INTERVAL_S = 1
+BUNDLE_READY_TIMEOUT_S = 30
 
 
 def _set_low_priority():
@@ -80,6 +83,22 @@ def _wait_for_stable_file(path: Path) -> bool:
     return True
 
 
+def _wait_for_bundle(path: Path, timeout_s: float | None = None) -> bool:
+    """Pacote pronto = manifest legível e todos os arquivos que ele lista presentes. O bot entrega
+    por rename (atômico), mas uma cópia entre volumes chega aos poucos."""
+    deadline = time.time() + (BUNDLE_READY_TIMEOUT_S if timeout_s is None else timeout_s)
+    while True:
+        loaded = read_manifest(path)
+        if loaded is not None:
+            files = [m["arquivo"] for m in loaded[0].get("mensagens", []) if m.get("arquivo")]
+            if all((path / f).exists() for f in files):
+                return True
+        if time.time() >= deadline:
+            logger.warning(f"Pacote incompleto, ignorado por ora: {path.name}")
+            return False
+        time.sleep(0.5)
+
+
 def expire_archive(ledger: Ledger) -> None:
     """Apaga áudio do Archive com mais de ARCHIVE_RETENTION_DAYS. A nota e o transcrito
     são preservados; a entrada do ledger NUNCA é apagada."""
@@ -98,13 +117,20 @@ def expire_archive(ledger: Ledger) -> None:
 
 
 def scan_inbox(ledger: Ledger) -> None:
-    """Varre a Inbox inteira — cobre arquivos que chegaram enquanto o watcher estava
+    """Varre a Inbox inteira — cobre arquivos e pacotes que chegaram enquanto o watcher estava
     parado, e retoma qualquer TRANSCRIBED pendente de enriquecimento."""
     if not config.INBOX_DIR.exists():
         return
-        
+
     for path in sorted(config.INBOX_DIR.iterdir()):
-        if not path.is_file() or is_ignored(path.name):
+        if is_ignored(path.name):
+            continue
+        if path.is_dir():
+            if is_bundle_name(path.name) and _wait_for_bundle(path):
+                process_bundle(path, ledger)
+                tracker.set_idle()
+            continue
+        if not path.is_file():
             continue
         try:
             size = path.stat().st_size
@@ -126,19 +152,22 @@ class _InboxHandler(FileSystemEventHandler):
         self._handle(event)
 
     def on_modified(self, event):
-        self._handle(event)
+        if not event.is_directory:  # pasta modificada = arquivo dentro dela; o pacote chega pelo created
+            self._handle(event)
 
     def on_moved(self, event):
         # Syncthing e o bot gravam num temporário e renomeiam: a chegada é um "moved".
         self._handle(event, Path(event.dest_path))
 
     def _handle(self, event, path: Path | None = None):
-        if event.is_directory:
-            return
         path = path or Path(event.src_path)
-        if path.parent != config.INBOX_DIR:
-            return  # renomeado para fora da Inbox
-        if is_ignored(path.name):
+        if path.parent != config.INBOX_DIR or is_ignored(path.name):
+            return  # renomeado para fora da Inbox, ou temporário/metadado
+        if event.is_directory:
+            # No Windows, uma pasta renomeada para dentro da Inbox chega como DirCreatedEvent.
+            if is_bundle_name(path.name) and _wait_for_bundle(path):
+                process_bundle(path, self.ledger)
+                tracker.set_idle()
             return
         if _wait_for_stable_file(path):
             process_file(path, self.ledger)
@@ -175,7 +204,7 @@ def run():
     observer.start()
     logger.info(f"Observando {config.INBOX_DIR} ...")
 
-    # O bot só grava arquivos na Inbox; o observer acima os processa como qualquer chegada.
+    # O bot só entrega arquivos e pacotes na Inbox; o observer acima os processa como qualquer chegada.
     stop_bot = threading.Event()
     start_bot_thread(stop_bot)
 
@@ -197,5 +226,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-

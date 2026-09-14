@@ -5,3 +5,7 @@ requests
 psutil
 rich
 questionary
+pypdf
+python-docx
+trafilatura
+ocrmypdf

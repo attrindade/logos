@@ -1,18 +1,33 @@
-"""Orquestra as etapas STT (ou texto direto) -> LLM -> Writer para um único arquivo."""
+"""Orquestra STT (ou texto direto) -> LLM -> Writer para um arquivo, e o mesmo para um pacote do Telegram."""
+import hashlib
+import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import aw, config
+from . import aw, config, extractors
 from .ledger import Entry, Ledger, State
 from .llm import enrich, short_enrichment
 from .status import PipelineStage, tracker
 from .stt import transcribe_file
-from .triage import is_ignored, is_text_file, triage
-from .writer import archive_audio, write_note
+from .triage import is_bundle_name, is_ignored, is_text_file, triage
+from .writer import (
+    IMAGE_EXTS,
+    append_to_note,
+    archive_audio,
+    store_attachment,
+    write_link_sidecar,
+    write_note,
+    write_sidecar,
+)
 
 logger = logging.getLogger(__name__)
+
+EXCERPT_WORDS = 1500  # por anexo, no texto enviado à LLM; o sidecar guarda o texto inteiro
+MAX_LINKS_PER_MESSAGE = 3
+TEXT_DOC_EXTS = {".md", ".txt"}
 
 
 def is_incomplete_file_error(error: Exception) -> bool:
@@ -27,6 +42,15 @@ def _mark_failed(path: Path, size: int, mtime: datetime, ledger: Ledger, stage: 
         route=t_initial.route.value, recorded_at=t_initial.recorded_at.isoformat(), error=str(error),
     ))
     tracker.set_failed(path.name, stage, str(error))
+
+
+def process_path(path: Path, ledger: Ledger) -> None:
+    """Arquivo solto -> process_file; pasta de pacote do bot -> process_bundle; outras pastas, nada."""
+    if path.is_dir():
+        if is_bundle_name(path.name):
+            process_bundle(path, ledger)
+        return
+    process_file(path, ledger)
 
 
 def process_file(path: Path, ledger: Ledger) -> None:
@@ -178,6 +202,231 @@ def process_file(path: Path, ledger: Ledger) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Pacotes do Telegram (Etapa 4)
+# ---------------------------------------------------------------------------
+
+def read_manifest(path: Path) -> tuple[dict, str] | None:
+    """(manifest, hash). O hash dos bytes do manifest compõe a chave do pacote no ledger."""
+    try:
+        raw = (path / "manifest.json").read_bytes()
+        manifest = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    return manifest, hashlib.sha256(raw).hexdigest()[:16]
+
+
+@dataclass
+class _Anexo:
+    source: Path
+    text: str = ""  # texto extraído; vira sidecar quando houver
+
+
+@dataclass
+class _Link:
+    url: str
+    title: str = ""
+    text: str = ""
+
+
+def _excerpt(text: str) -> str:
+    words = text.split()
+    return text if len(words) <= EXCERPT_WORDS else " ".join(words[:EXCERPT_WORDS]) + " […]"
+
+
+def _one_line(text: str, limit: int = 200) -> str:
+    line = " ".join(text.split())
+    return line if len(line) <= limit else line[:limit].rstrip() + "…"
+
+
+def _mmss(seconds: float) -> str:
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+def _parse_iso(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _bundle_size(path: Path) -> int:
+    try:
+        return sum(p.stat().st_size for p in path.iterdir() if p.is_file())
+    except OSError:
+        return 0
+
+
+def process_bundle(path: Path, ledger: Ledger) -> None:
+    loaded = read_manifest(path)
+    if loaded is None:
+        logger.warning(f"Pacote sem manifest legível, ignorado por ora: {path.name}")
+        return
+    manifest, digest = loaded
+    if ledger.is_processed_bundle(path.name, digest):
+        logger.debug(f"Pacote já processado (ledger): {path.name}")
+        return
+    message_ids = [m["message_id"] for m in manifest.get("mensagens", []) if "message_id" in m]
+    try:
+        _process_bundle(path, manifest, digest, message_ids, ledger)
+    except Exception as e:
+        logger.exception(f"Falha ao processar o pacote {path.name}")
+        ledger.upsert(Entry(
+            filename=path.name, size=_bundle_size(path), state=State.FAILED,
+            manifest_hash=digest, message_ids=message_ids, error=str(e),
+        ))
+        tracker.set_failed(path.name, PipelineStage.WRITING, str(e))
+
+
+def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[int], ledger: Ledger) -> None:
+    start_time = time.time()
+    started_at = datetime.now().astimezone()
+    mensagens = manifest.get("mensagens", [])
+    size = _bundle_size(path)
+    tracker.set_stage(
+        PipelineStage.TRIAGING, filename=path.name, file_size=size,
+        message=f"Pacote do Telegram: {len(mensagens)} mensagem(ns)",
+    )
+
+    sections: list[str] = []
+    anexos: list[_Anexo] = []
+    links: list[_Link] = []
+    triage_text = ""  # primeiro texto, voz ou legenda: decide rota e categoria
+    duracao_audio_s = 0.0
+    local = None
+    fotos = 0
+
+    for m in mensagens:
+        tipo = m.get("tipo", "")
+        legenda = (m.get("legenda") or "").strip()
+        arquivo = path / m["arquivo"] if m.get("arquivo") else None
+        ext = arquivo.suffix.lower() if arquivo else ""
+        conteudo = ""
+
+        if tipo == "texto":
+            conteudo = (m.get("texto") or "").strip()
+            sections.append(conteudo)
+        elif tipo in ("voz", "audio") and arquivo:
+            tracker.set_stage(
+                PipelineStage.TRANSCRIBING, filename=path.name, file_size=size,
+                message=f"Transcrevendo {arquivo.name} do pacote com Whisper...",
+            )
+            try:
+                transcription = transcribe_file(arquivo)
+                conteudo = transcription.text
+                duracao_audio_s += transcription.duration_s
+                sections.append(f"[voz {_mmss(transcription.duration_s)}] {conteudo}".rstrip())
+            except Exception as e:
+                logger.error(f"Falha na transcrição de {arquivo.name} em {path.name}: {e}")
+                sections.append("[voz: falha na transcrição]")
+        elif arquivo and (tipo == "foto" or ext in IMAGE_EXTS):
+            fotos += 1
+            texto = extractors.image_text(arquivo)
+            anexos.append(_Anexo(arquivo, texto))
+            sections.append(f"[foto {fotos}: {_one_line(texto) or 'sem texto reconhecido'}] {legenda}".rstrip())
+        elif arquivo and ext in TEXT_DOC_EXTS:
+            conteudo = extractors.plain_text(arquivo)  # .md/.txt enviado como documento é a própria nota
+            sections.append(conteudo)
+        elif arquivo:
+            nome = m.get("nome_original") or arquivo.name
+            texto = extractors.document_text(arquivo)
+            anexos.append(_Anexo(arquivo, texto))
+            marcador = "pdf" if ext == ".pdf" else "arquivo"
+            sections.append("\n".join(filter(None, [f"[{marcador}: {nome}] {legenda}".rstrip(), _excerpt(texto)])))
+        elif tipo == "localizacao" and m.get("local"):
+            local = m["local"]
+            titulo = f" · {local['titulo']}" if local.get("titulo") else ""
+            sections.append(f"[local: {local['lat']}, {local['lon']}{titulo}] {legenda}".rstrip())
+
+        for url in m.get("links", [])[:MAX_LINKS_PER_MESSAGE]:
+            title, text = extractors.link_text(url)
+            links.append(_Link(url, title, text))
+            sections.append("\n".join(filter(None, [f"[link: {title or url}] {url}", _excerpt(text)])))
+
+        if not triage_text:
+            triage_text = conteudo or legenda
+
+    transcript = "\n\n".join(s for s in sections if s).strip()
+    t = triage(path.name, triage_text, fallback=_parse_iso(manifest.get("aberto_em")))
+
+    config.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    transcript_path = config.TRANSCRIPTS_DIR / f"{t.recorded_at:%Y-%m-%d_%H-%M-%S}_{t.route.value}_tg.txt"
+    transcript_path.write_text(transcript, encoding="utf-8")
+
+    tracker.set_stage(
+        PipelineStage.WRITING, filename=path.name, file_size=size, route=t.route.value,
+        message="Guardando anexos e sidecars no vault...",
+    )
+    stored: list[dict] = []
+    n = 0
+    for anexo in anexos:
+        n += 1
+        dest = store_attachment(anexo.source, t.recorded_at, n)
+        long_image_text = dest.suffix.lower() in IMAGE_EXTS and len(anexo.text) > 200
+        needs_sidecar = anexo.text.strip() and (dest.suffix.lower() not in IMAGE_EXTS or long_image_text)
+        stored.append({"path": dest, "sidecar": write_sidecar(dest, anexo.text) if needs_sidecar else None})
+    for link in links:
+        n += 1
+        sidecar = write_link_sidecar(link.url, link.title, link.text, t.recorded_at, n) if link.text.strip() else None
+        stored.append({"url": link.url, "titulo": link.title, "sidecar": sidecar})
+
+    reply_to = manifest.get("reply_to")
+    target = ledger.find_by_message_id(reply_to) if reply_to is not None else None
+    if target is not None and Path(target.note_path).exists():
+        # Resposta a uma mensagem que já virou nota: complementa aquela nota.
+        note_path = Path(target.note_path)
+        append_to_note(note_path, stored, transcript, t.recorded_at, local=local)
+        route = target.route or t.route.value
+        logger.info(f"Pacote {path.name} anexado à nota existente: {note_path}")
+    else:
+        route = t.route.value
+        base = triage_text or next((a.text for a in anexos if a.text.strip()), "")
+        if len(transcript.split()) < config.LLM_MIN_WORDS:
+            enrichment = short_enrichment(base) if base.strip() else {
+                "titulo": _fallback_title(anexos, local), "tags": [], "resumo": "",
+            }
+            llm_model = ""
+        else:
+            tracker.set_stage(
+                PipelineStage.ENRICHING, filename=path.name, file_size=size, route=route,
+                message=f"Enriquecendo pacote com IA via Ollama ({config.LLM_MODEL})...",
+            )
+            llm_model = config.LLM_MODEL
+            try:
+                enrichment = enrich(transcript, t.route)
+            except Exception as e:
+                logger.warning(f"Falha na etapa LLM do pacote {path.name}: {e}. Nota sem enriquecimento.")
+                enrichment = short_enrichment(base) if base.strip() else {"titulo": path.name, "tags": [], "resumo": ""}
+        note_path = write_note(
+            path.name, t, transcript, enrichment, llm_model,
+            fonte_tipo="pacote", anexos=stored, local=local,
+        )
+        logger.info(f"Nota gerada a partir do pacote {path.name}: {note_path}")
+
+    ledger.upsert(Entry(
+        filename=path.name, size=size, state=State.ENRICHED,
+        route=route, recorded_at=t.recorded_at.isoformat(),
+        transcript_path=str(transcript_path), note_path=str(note_path),
+        manifest_hash=digest, message_ids=message_ids,
+    ))
+    elapsed = time.time() - start_time
+    tracker.set_completed(filename=path.name, route=route, note_path=str(note_path), elapsed_s=elapsed)
+    aw.post_capture(
+        started_at, rota=route, canal=t.canal, tipo="pacote",
+        duracao_audio_s=duracao_audio_s, processamento_s=elapsed,
+    )
+
+
+def _fallback_title(anexos: list[_Anexo], local) -> str:
+    if anexos and all(a.source.suffix.lower() in IMAGE_EXTS for a in anexos):
+        return "Foto do Telegram" if len(anexos) == 1 else "Fotos do Telegram"
+    if local and not anexos:
+        return f"Localização {local.get('titulo') or ''}".strip()
+    return "Anexo do Telegram"
+
+
 def retry_failed(ledger: Ledger) -> None:
     """Reenfileira entradas com estado FAILED, exceto as já superadas por uma versão maior
     do mesmo arquivo que chegou a ENRICHED (fantasmas de sincronização parcial)."""
@@ -188,4 +437,4 @@ def retry_failed(ledger: Ledger) -> None:
         path = config.INBOX_DIR / entry.filename
         if path.exists():
             logger.info(f"Reprocessando arquivo que falhou antes: {entry.filename}")
-            process_file(path, ledger)
+            process_path(path, ledger)

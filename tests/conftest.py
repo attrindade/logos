@@ -15,5 +15,7 @@ os.environ["LOGOS_INBOX_DIR"] = str(_TEST_ROOT / "Inbox")
 os.environ["LOGOS_NOTES_DIR"] = str(_TEST_ROOT / "Notes")
 # Porta fechada: process_file real nos testes não pode postar capturas falsas no ActivityWatch.
 os.environ["LOGOS_AW_PORT"] = "1"
+# Nenhum teste carrega modelo de visão no Ollama; os de extração ligam o que precisam.
+os.environ["LOGOS_VISION_MODEL"] = ""
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

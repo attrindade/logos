@@ -147,4 +147,61 @@ Observações: se um áudio estiver sendo processado, o texto espera na fila (o 
 
 ### Pendente
 
-- Token, `/start` e o teste de aceite acima.
+- Token, `/start` e o teste de aceite acima. **Atenção:** a Etapa 4 muda o comportamento descrito aqui (mensagens esperam a janela ou `/nova`); o teste de aceite atualizado está na Etapa 4.
+
+## Etapa 4 · Pacotes multimodais (2026-09-14)
+
+### Fatos verificados antes de desenhar
+
+| Pergunta do plano | Resposta medida |
+|---|---|
+| `gemma4:e4b` aceita imagem? | Sim (`ollama show` lista `vision`; `POST /api/generate` com `images` responde). **78 s** para uma imagem na CPU (17 s de carga do modelo), e a descrição de uma imagem só com texto saiu errada ("padrão abstrato"). Por isso a visão é só o último recurso, quando o OCR vem vazio. Nenhum modelo novo baixado. |
+| `defuddle` | É um CLI do npm (`npm install -g defuddle`) que não está instalado. O extrator usa `defuddle` se estiver no PATH e, senão, `trafilatura`. |
+| Pasta renomeada para dentro da Inbox, no Windows | O watchdog emite `DirCreatedEvent` (e depois `DirModifiedEvent`), não `moved`. O watcher trata o created e ignora o modified de pasta. |
+| OCR (PERGUNTAR) | Você escolheu **Tesseract por+eng** e **ocrmypdf**. Tesseract 5.4 instalado por `winget` em `C:\Program Files\Tesseract-OCR` (só vem com `eng`/`osd`). `por.traineddata` baixado do repositório oficial `tesseract-ocr/tessdata` para `C:\Users\andre\Logos\models\tessdata`, junto com cópias de `eng`, `osd`, `configs/` e `tessconfigs/` (o `ocrmypdf` exige `configs/hocr`). Ghostscript não é necessário: o `ocrmypdf` roda com `--output-type pdf`. |
+
+### Decisões
+
+- **Staging, não montagem na Inbox.** O pacote é montado em `state/telegram/aberto/<nome>/`, com o `manifest.json` regravado a cada mensagem, e ao fechar a pasta inteira é renomeada para a Inbox (mesmo volume, rename atômico). O watcher só vê pacotes completos, nada é movido *dentro* da Inbox (regra 1), e a recuperação após queda é varrer uma pasta conhecida.
+- **A janela fecha** com `/nova`, com `telegram_window_min` (10) vencido (checado a cada volta do polling, até 30 s de atraso) ou no início do bot (pacotes deixados abertos por um reinício são entregues como estão; não há janela atravessando reinícios).
+- **Nome do pacote `YYYY-MM-DD HH-MM-SS tg <message_id da primeira mensagem>`**, mesmo desvio consciente da Etapa 3: o id evita colisão e deixa a reentrega idempotente (mensagem já no pacote aberto é ignorada; pacote já entregue com os mesmos ids é descartado do staging).
+- **Regras de agrupamento, na ordem pedida:** legenda é texto da nota (e candidata à triagem); álbum cai no mesmo pacote pela janela (o `media_group_id` fica registrado); resposta a mensagem do pacote aberto fica no pacote; **resposta a mensagem fora dele vira pacote próprio, fechado na hora, com `reply_to`**, e o pipeline acrescenta uma seção `## 📎 Resposta de …` ao fim da nota original, achada por `message_ids` no ledger (se não achar, vira nota nova); janela de 10 min agrupa; anexo sozinho vira nota com título do OCR, ou "Foto do Telegram".
+- **Resposta não mexe no frontmatter da nota original** (que pode ter `promoted:` e edições à mão): o `anexos:` dela não ganha os novos arquivos; os embeds ficam no corpo.
+- **Embeds com caminho relativo ao vault** (`![[capturas/anexos/2026/09/…_2.pdf#page=1]]`). O sidecar `X.pdf.md` tem nome de nota `X.pdf`, igual ao PDF; o caminho completo é a forma de o Obsidian resolver para o arquivo certo. Raiz do vault = pasta-mãe de `notes_dir`, configurável em `vault_dir`.
+- **Ledger:** `Entry` ganhou `manifest_hash` e `message_ids` (entradas antigas continuam válidas); chave do pacote `nome::sha256(manifest)[:16]`; manifest serializado com `sort_keys` para o hash ser estável. Pacote não tem `archive_path`: fica na Inbox (receive-only, fora do Syncthing pelo `* tg*`) e não entra na expiração.
+- **Voz do pacote não é copiada para o vault** (o vault vai para o GitHub na sessão A): a transcrição entra na nota e o `.oga` fica no pacote da Inbox.
+- **Texto enviado à LLM:** até 1500 palavras por anexo; o texto inteiro fica no sidecar. Sidecar para PDF/.docx com texto e para foto cujo OCR passe de 200 caracteres; OCR curto fica só no marcador `[foto n: …]`.
+- **Limites:** 20 MB por arquivo em todos os tipos de mídia (resposta ao usuário), no máximo 3 links extraídos por mensagem, `ocrmypdf` com timeout de 600 s, Tesseract 120 s, link 15 s.
+
+### O que mudou
+
+| Arquivo | Mudança |
+|---|---|
+| `logos/telegram.py` | `Session`, `staging_dir`, `write_manifest` (atômico, determinístico), `finalize_bundle`, `recover`, `expire_if_idle`; foto (maior resolução), documento, áudio, localização/venue, links de `entities` (offsets UTF-16); `/nova` fecha; confirmações dizem "sessão aberta … fecha após 10 min ou /nova" e "N na sessão". |
+| `logos/extractors.py` | `ocr_image` (Tesseract `por+eng`, `TESSDATA_PREFIX`), `describe_image` (Ollama com `images`), `image_text`, `pdf_text` (pypdf → `ocrmypdf` em cópia temporária), `docx_text`, `plain_text`, `link_text` (defuddle → trafilatura). Nunca lançam. |
+| `logos/pipeline.py` | `process_path` (arquivo ou pacote), `read_manifest`, `process_bundle`: transcreve voz, extrai anexos, monta o texto com `[foto n: …]`, `[pdf: nome]`, `[link: título]`, `[local: …]`, triagem pelo primeiro texto/voz/legenda, nota curta ou LLM, anexos + sidecars, resposta anexada, ledger, evento `tipo: pacote` no AW. Falha → `failed` com hash, reprocessado no próximo início. |
+| `logos/writer.py` | `store_attachment`, `write_sidecar`, `write_link_sidecar`, `append_to_note`, `anexos:` e `local:` no frontmatter, seção `## 📎 Anexos`, seção `## 💬 Mensagens`. |
+| `logos/watcher.py` | Pastas de pacote em `on_created`, `scan_inbox` e `retry_failed`; `_wait_for_bundle` exige manifest legível e todos os arquivos listados. |
+| `logos/ledger.py`, `config.py`, `llm.py`, `triage.py` | `manifest_hash`, `message_ids`, `find_by_message_id`; `telegram_window_min`, `vault_dir`, `tesseract_cmd`, `tessdata_dir`, `ocr_langs`, `vision_model`; `_ollama_generate(images=…)`; `is_bundle_name`. |
+| `requirements.txt` | `pypdf`, `python-docx`, `trafilatura`, `ocrmypdf` (já instalados no `.venv`). |
+
+### Verificação
+
+- `pytest`: suíte completa verde, incluindo OCR real em português e PDF escaneado passando pelo `ocrmypdf` (os dois são pulados numa máquina sem Tesseract).
+- **Aceite simulado de ponta a ponta** com `main.py` real em pastas temporárias, bot dirigido por `handle_update` com rede e download simulados (foto e PDF reais), Tesseract real, LLM desligada por `LLM_MIN_WORDS` alto: texto `planejamento visita técnica na obra` → foto com legenda → PDF de 2 páginas → `/nova`. Respostas do bot: "sessão aberta … fecha após 10 min", "2 na sessão", "3 na sessão", "Sessão fechada com 3". **Uma nota** em `Planejamento/` 0,8 s depois do `/nova`, com `anexos:` (jpg e pdf), `![[…_1.jpg|400]]`, `![[…_2.pdf#page=1]]`, link para o sidecar `…_2.pdf.md` com o texto do PDF, e `[foto 1: Pauta: orçamento da obra] quadro da reunião` vindo do OCR. Inbox ficou só com a pasta do pacote; staging vazio.
+- **Não testado:** Telegram de verdade (sem token), LLM real num pacote (o caminho é o mesmo das notas longas, coberto por teste de unidade), Obsidian renderizando os embeds.
+
+### Teste de aceite (você, pelo celular, depois de relançar)
+
+1. Com o `secrets.yaml` gravado e o watcher relançado, mandar `/start` (se ainda não mandou).
+2. Em até 3 minutos: um texto (ex.: `planejamento visita técnica`), uma foto com legenda, um PDF.
+3. Mandar `/nova` (ou esperar 10 min).
+4. Esperar a nota em `C:\Workspace\notes\capturas\Planejamento\` (com PDF e mais de 40 palavras, passa pela LLM: alguns minutos na CPU).
+5. **No Obsidian**, abrir a nota e conferir: a foto aparece, o PDF mostra a página 1, e "Texto extraído" abre o sidecar. Se o embed do PDF mostrar o texto do sidecar em vez da página, me avise: troco o nome do sidecar.
+6. Responder (arrastar para responder) a uma mensagem de ontem com uma foto → a foto aparece no fim da nota de ontem.
+
+### Pendente
+
+- Token, relançamento e o teste acima.
+- Frontmatter `anexos:` da nota original não é atualizado quando chega uma resposta (decisão acima).
+- `defuddle` não instalado; links saem pelo `trafilatura`.

@@ -1,4 +1,4 @@
-"""Etapa 3: bot Telegram (captura, dono, comandos, voz) e CLI send/check. Sem rede."""
+"""Etapas 3 e 4: bot Telegram (dono, comandos, pacotes multimodais) e CLI send/check. Sem rede."""
 import json
 import logging
 import subprocess
@@ -13,17 +13,19 @@ import requests
 
 from logos import config, telegram
 from logos.telegram import Bot, TelegramError
-from logos.triage import triage
+from logos.triage import is_bundle_name, triage
 
 TOKEN = "123456:SEGREDO-NAO-VAZAR"
 OWNER = 42
 DATE = int(datetime(2026, 9, 14, 15, 2, 11).timestamp())
+BUNDLE = "2026-09-14 15-02-11 tg 7"
 
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(config, "INBOX_DIR", tmp_path / "Inbox")
+    monkeypatch.setattr(config, "TELEGRAM_WINDOW_MIN", 10)
     monkeypatch.delenv("LOGOS_TELEGRAM_TOKEN", raising=False)
     config.INBOX_DIR.mkdir()
     return tmp_path
@@ -40,8 +42,18 @@ def api():
         yield call
 
 
-def _update(text=None, chat=OWNER, message_id=7, **extra):
-    message = {"message_id": message_id, "date": DATE, "chat": {"id": chat}, **extra}
+@pytest.fixture
+def downloads():
+    """download_file falso: grava o file_id como conteúdo do destino."""
+    def fake(token, file_id, dest):
+        dest.write_bytes(f"conteudo {file_id}".encode())
+
+    with patch.object(telegram, "download_file", side_effect=fake) as download:
+        yield download
+
+
+def _update(text=None, chat=OWNER, message_id=7, date=DATE, **extra):
+    message = {"message_id": message_id, "date": date, "chat": {"id": chat}, **extra}
     if text is not None:
         message["text"] = text
     return {"update_id": 1000 + message_id, "message": message}
@@ -50,6 +62,21 @@ def _update(text=None, chat=OWNER, message_id=7, **extra):
 def _replies(api):
     return [c.kwargs["text"] for c in api.call_args_list if c.args[1] == "sendMessage"]
 
+
+def _staged():
+    root = telegram.staging_dir()
+    return sorted(p.name for p in root.iterdir()) if root.exists() else []
+
+
+def _inbox():
+    return sorted(p.name for p in config.INBOX_DIR.iterdir())
+
+
+def _manifest(name):
+    return json.loads((config.INBOX_DIR / name / "manifest.json").read_text(encoding="utf-8"))
+
+
+# --- dono -----------------------------------------------------------------
 
 def test_start_registra_o_dono(env, api):
     telegram.save_secrets({"telegram_token": TOKEN})
@@ -64,115 +91,244 @@ def test_sem_dono_mensagem_comum_e_ignorada(env, api):
     telegram.save_secrets({"telegram_token": TOKEN})
     Bot(TOKEN).handle_update(_update("oi"))
     assert telegram.get_owner_chat_id() is None
-    assert list(config.INBOX_DIR.iterdir()) == []
+    assert _inbox() == [] and _staged() == []
     api.assert_not_called()
 
 
 def test_outro_chat_e_ignorado_e_o_conteudo_nao_vai_ao_log(owner, api, caplog):
     with caplog.at_level(logging.INFO):
         Bot(TOKEN).handle_update(_update("segredo do intruso", chat=999))
-    assert list(config.INBOX_DIR.iterdir()) == []
+    assert _inbox() == [] and _staged() == []
     api.assert_not_called()
     assert "999" in caplog.text and "segredo do intruso" not in caplog.text
 
 
-def test_texto_vira_arquivo_da_inbox_com_confirmacao(owner, api):
-    Bot(TOKEN).handle_update(_update("tarefa urgente testar o bot"))
+# --- sessões e pacotes ----------------------------------------------------
 
-    name = "2026-09-14 15-02-11 tg 7.txt"
-    assert [p.name for p in config.INBOX_DIR.iterdir()] == [name]
-    assert (config.INBOX_DIR / name).read_text(encoding="utf-8") == "tarefa urgente testar o bot\n"
-    assert _replies(api) == [f"📥 {name}"]
-    reply_call = api.call_args_list[0]
-    assert reply_call.kwargs["reply_parameters"]["message_id"] == 7
+def test_texto_abre_sessao_e_nova_entrega_o_pacote(owner, api):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("tarefa urgente testar o bot"))
 
-    t = triage(name, "tarefa urgente testar o bot")
+    assert _staged() == [BUNDLE] and _inbox() == []
+    assert "sessão aberta" in _replies(api)[0] and "/nova" in _replies(api)[0]
+
+    bot.handle_update(_update("/nova", message_id=8))
+
+    assert _staged() == [] and _inbox() == [BUNDLE]
+    manifest = _manifest(BUNDLE)
+    assert manifest["motivo_fechamento"] == "nova"
+    assert manifest["mensagens"] == [
+        {"message_id": 7, "date": "2026-09-14T15:02:11", "tipo": "texto", "texto": "tarefa urgente testar o bot"},
+    ]
+    assert "Sessão fechada com 1" in _replies(api)[1]
+    assert is_bundle_name(BUNDLE)
+    t = triage(BUNDLE, "tarefa urgente testar o bot")
     assert (t.canal, t.categoria, t.prioridade) == ("telegram", "tarefa", "alta")
     assert t.recorded_at == datetime(2026, 9, 14, 15, 2, 11)
 
 
+def test_texto_foto_e_pdf_na_janela_viram_um_pacote(owner, api, downloads):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("planejamento da visita técnica", message_id=7))
+    bot.handle_update(_update(
+        message_id=8, date=DATE + 60, caption="quadro da reunião",
+        photo=[{"file_id": "p-pequena", "file_size": 10}, {"file_id": "p-grande", "file_size": 99}],
+    ))
+    bot.handle_update(_update(
+        message_id=9, date=DATE + 120,
+        document={"file_id": "d1", "file_size": 500, "file_name": "Relatório.pdf", "mime_type": "application/pdf"},
+    ))
+    bot.handle_update(_update("/nova", message_id=10))
+
+    assert _inbox() == [BUNDLE]
+    assert sorted(p.name for p in (config.INBOX_DIR / BUNDLE).iterdir()) == ["8.jpg", "9.pdf", "manifest.json"]
+    mensagens = _manifest(BUNDLE)["mensagens"]
+    assert [m["tipo"] for m in mensagens] == ["texto", "foto", "documento"]
+    assert mensagens[1]["legenda"] == "quadro da reunião" and mensagens[1]["arquivo"] == "8.jpg"
+    assert downloads.call_args_list[0].args[1] == "p-grande"
+    assert mensagens[2]["nome_original"] == "Relatório.pdf"
+    assert "3 na sessão" in _replies(api)[2]
+
+
+def test_janela_vencida_fecha_no_tick(owner, api):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("ideia um"))
+    assert bot.expire_if_idle() is None
+    bot.session.last_at -= 11 * 60
+
+    assert bot.expire_if_idle() == BUNDLE
+    assert _inbox() == [BUNDLE] and _manifest(BUNDLE)["motivo_fechamento"] == "janela"
+    assert bot.session is None
+
+
+def test_mensagem_depois_da_janela_abre_outro_pacote(owner, api):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("ideia um"))
+    bot.session.last_at -= 11 * 60
+    bot.handle_update(_update("ideia dois", message_id=20))
+
+    assert _inbox() == [BUNDLE]
+    assert _staged() == ["2026-09-14 15-02-11 tg 20"]
+
+
+def test_resposta_a_mensagem_da_sessao_fica_no_pacote(owner, api):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("ideia"))
+    bot.handle_update(_update("complemento", message_id=8, reply_to_message={"message_id": 7}))
+
+    assert bot.session.size == 2
+    assert bot.session.manifest["mensagens"][1]["reply_to"] == 7
+    assert "reply_to" not in bot.session.manifest
+
+
+def test_resposta_a_mensagem_antiga_vira_pacote_fechado_com_reply_to(owner, api, downloads):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("ideia aberta", message_id=30))
+    bot.handle_update(_update(message_id=31, photo=[{"file_id": "f", "file_size": 5}], reply_to_message={"message_id": 3}))
+
+    assert _inbox() == ["2026-09-14 15-02-11 tg 31"]
+    assert _manifest("2026-09-14 15-02-11 tg 31")["reply_to"] == 3
+    assert bot.session is not None and bot.session.size == 1  # a sessão aberta segue intacta
+    assert "resposta" in _replies(api)[1]
+
+
+def test_album_localizacao_e_links_vao_ao_manifest(owner, api, downloads):
+    bot = Bot(TOKEN)
+    texto = "leia https://exemplo.com/artigo e 😀 https://b.org"
+    bot.handle_update(_update(texto, message_id=7, entities=[
+        {"type": "url", "offset": 5, "length": 26},
+        {"type": "url", "offset": 37, "length": 13},  # o emoji ocupa 2 unidades UTF-16
+        {"type": "text_link", "offset": 0, "length": 4, "url": "https://c.net"},
+    ]))
+    for mid in (8, 9):
+        bot.handle_update(_update(message_id=mid, media_group_id="album1", photo=[{"file_id": f"f{mid}", "file_size": 5}]))
+    bot.handle_update(_update(
+        message_id=10,
+        location={"latitude": -30.03, "longitude": -51.23},
+        venue={"location": {"latitude": -30.03, "longitude": -51.23}, "title": "Escritório", "address": "Rua X"},
+    ))
+
+    mensagens = bot.session.manifest["mensagens"]
+    assert mensagens[0]["links"] == ["https://exemplo.com/artigo", "https://b.org", "https://c.net"]
+    assert [m.get("media_group_id") for m in mensagens[1:3]] == ["album1", "album1"]
+    assert mensagens[3]["local"] == {"lat": -30.03, "lon": -51.23, "titulo": "Escritório", "endereco": "Rua X"}
+
+
 def test_comando_prefixa_a_primeira_palavra(owner, api):
-    Bot(TOKEN).handle_update(_update("/tarefa@LogosBot comprar pão"))
-    [path] = config.INBOX_DIR.iterdir()
-    assert path.read_text(encoding="utf-8") == "tarefa comprar pão\n"
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("/tarefa@LogosBot comprar pão"))
+    assert bot.session.manifest["mensagens"][0]["texto"] == "tarefa comprar pão"
 
 
 def test_comando_sem_texto_responde_uso(owner, api):
     Bot(TOKEN).handle_update(_update("/ideia"))
-    assert list(config.INBOX_DIR.iterdir()) == []
+    assert _staged() == []
     assert _replies(api) == ["Uso: /ideia <texto>"]
 
 
 @pytest.mark.parametrize("text", ["/diario hoje foi longo", "Diário: hoje foi longo"])
 def test_diario_ganha_lembrete_da_nuvem(owner, api, text):
-    Bot(TOKEN).handle_update(_update(text))
-    [path] = config.INBOX_DIR.iterdir()
-    assert path.read_text(encoding="utf-8").lower().startswith("diário")
+    bot = Bot(TOKEN)
+    bot.handle_update(_update(text))
+    assert bot.session.manifest["mensagens"][0]["texto"].lower().startswith("diário")
     assert "nuvem" in _replies(api)[0]
 
 
-def test_nova_e_comando_desconhecido_respondem_sem_gravar(owner, api):
+def test_nova_sem_sessao_e_comando_desconhecido(owner, api):
     bot = Bot(TOKEN)
     bot.handle_update(_update("/nova", message_id=1))
     bot.handle_update(_update("/xyz", message_id=2))
-    assert list(config.INBOX_DIR.iterdir()) == []
+    assert _inbox() == [] and _staged() == []
     first, second = _replies(api)
-    assert "Etapa 4" in first and "/tarefa" in second
+    assert "Nenhuma sessão" in first and "/tarefa" in second
 
 
-def test_reentrega_nao_duplica(owner, api):
+def test_reentrega_dentro_da_sessao_nao_duplica(owner, api):
     bot = Bot(TOKEN)
     bot.handle_update(_update("ideia uma"))
     bot.handle_update(_update("ideia uma"))
-    assert len(list(config.INBOX_DIR.iterdir())) == 1
+    assert bot.session.size == 1
 
 
-def test_mensagens_no_mesmo_segundo_nao_colidem(owner, api):
+def test_reentrega_de_pacote_ja_entregue_nao_duplica(owner, api):
     bot = Bot(TOKEN)
-    bot.handle_update(_update("um", message_id=1))
-    bot.handle_update(_update("dois", message_id=2))
-    assert len(list(config.INBOX_DIR.iterdir())) == 2
+    bot.handle_update(_update("ideia"))
+    bot.handle_update(_update("/nova", message_id=8))
+    bot.handle_update(_update("ideia"))  # o Telegram reentrega a mensagem 7
+    bot.handle_update(_update("/nova", message_id=8))
+    assert _inbox() == [BUNDLE] and _staged() == []
 
 
-def test_voz_e_baixada_como_oga(owner, api):
-    voice = {"file_id": "abc", "file_size": 12345, "duration": 4}
-    with patch.object(telegram, "download_file") as download:
-        Bot(TOKEN).handle_update(_update(voice=voice))
-    download.assert_called_once()
-    assert download.call_args.args[1] == "abc"
-    assert download.call_args.args[2] == config.INBOX_DIR / "2026-09-14 15-02-11 tg 7.oga"
-    assert _replies(api) == ["📥 2026-09-14 15-02-11 tg 7.oga"]
+def test_voz_e_baixada_como_oga(owner, api, downloads):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update(voice={"file_id": "abc", "file_size": 12345, "duration": 4}))
+    assert downloads.call_args.args[1] == "abc"
+    assert downloads.call_args.args[2] == telegram.staging_dir() / BUNDLE / "7.oga"
+    assert bot.session.manifest["mensagens"][0]["tipo"] == "voz"
 
 
-def test_voz_acima_de_20mb_e_recusada(owner, api):
-    voice = {"file_id": "abc", "file_size": 25 * 1024 * 1024}
-    with patch.object(telegram, "download_file") as download:
-        Bot(TOKEN).handle_update(_update(voice=voice))
-    download.assert_not_called()
+def test_audio_e_documento_mantem_a_extensao(owner, api, downloads):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update(audio={"file_id": "a", "file_size": 10, "file_name": "gravacao.M4A"}, message_id=7))
+    bot.handle_update(_update(document={"file_id": "d", "file_size": 10, "mime_type": "application/pdf"}, message_id=8))
+    assert [m["arquivo"] for m in bot.session.manifest["mensagens"]] == ["7.m4a", "8.pdf"]
+
+
+@pytest.mark.parametrize("media", [
+    {"voice": {"file_id": "v", "file_size": 25 * 1024 * 1024}},
+    {"photo": [{"file_id": "p", "file_size": 21 * 1024 * 1024}]},
+    {"document": {"file_id": "d", "file_size": 30 * 1024 * 1024, "file_name": "grande.pdf"}},
+])
+def test_arquivo_acima_de_20mb_e_recusado(owner, api, downloads, media):
+    Bot(TOKEN).handle_update(_update(**media))
+    downloads.assert_not_called()
+    assert _staged() == []
     assert "20 MB" in _replies(api)[0]
 
 
-def test_audio_mantem_a_extensao(owner, api):
-    audio = {"file_id": "abc", "file_size": 10, "file_name": "gravacao.m4a", "mime_type": "audio/mp4"}
-    with patch.object(telegram, "download_file") as download:
-        Bot(TOKEN).handle_update(_update(audio=audio))
-    assert download.call_args.args[2].suffix == ".m4a"
+def test_tipo_nao_suportado_responde(owner, api):
+    Bot(TOKEN).handle_update(_update(sticker={"file_id": "s"}))
+    assert _staged() == []
+    assert "não suportado" in _replies(api)[0]
 
 
-def test_foto_responde_que_chega_na_etapa_4(owner, api):
-    Bot(TOKEN).handle_update(_update(photo=[{"file_id": "x"}], caption="quadro"))
-    assert list(config.INBOX_DIR.iterdir()) == []
-    assert "Etapa 4" in _replies(api)[0]
-
-
-def test_falha_ao_salvar_avisa_o_usuario(owner, api):
+def test_falha_ao_baixar_avisa_e_nao_registra_a_mensagem(owner, api):
+    bot = Bot(TOKEN)
     with patch.object(telegram, "download_file", side_effect=TelegramError("getFile: 400")):
-        Bot(TOKEN).handle_update(_update(voice={"file_id": "abc", "file_size": 1}))
-    assert "Reenvie" in _replies(api)[0]
+        bot.handle_update(_update(voice={"file_id": "abc", "file_size": 1}))
+    assert "Reenvie" in _replies(api)[-1]
+    assert bot.session is None or bot.session.size == 0
 
+
+def test_recover_entrega_pacotes_deixados_abertos(owner, api):
+    Bot(TOKEN).handle_update(_update("texto antes da queda"))
+
+    reiniciado = Bot(TOKEN)  # a sessão em memória se perdeu
+    assert reiniciado.recover() == [BUNDLE]
+    assert _inbox() == [BUNDLE] and _staged() == []
+    assert _manifest(BUNDLE)["motivo_fechamento"] == "reinicio"
+
+
+def test_recover_descarta_pasta_sem_mensagens(env):
+    vazia = telegram.staging_dir() / "2026-09-14 15-02-11 tg 1"
+    vazia.mkdir(parents=True)
+    assert Bot(TOKEN).recover() == []
+    assert not vazia.exists()
+
+
+def test_manifest_e_deterministico(env, tmp_path):
+    d = tmp_path / "pacote"
+    d.mkdir()
+    telegram.write_manifest(d, {"b": 1, "a": [1, 2]})
+    first = (d / "manifest.json").read_bytes()
+    telegram.write_manifest(d, {"a": [1, 2], "b": 1})
+    assert (d / "manifest.json").read_bytes() == first
+
+
+# --- API ------------------------------------------------------------------
 
 def test_download_grava_por_temporario(env):
-    dest = config.INBOX_DIR / "2026-09-14 15-02-11 tg 7.oga"
+    dest = env / "7.oga"
     resp = MagicMock()
     resp.__enter__.return_value = resp
     resp.iter_content.return_value = [b"OggS", b"dados"]
@@ -181,7 +337,7 @@ def test_download_grava_por_temporario(env):
         telegram.download_file(TOKEN, "abc", dest)
     assert get.call_args.args[0] == f"https://api.telegram.org/file/bot{TOKEN}/voice/file_1.oga"
     assert dest.read_bytes() == b"OggSdados"
-    assert [p.name for p in config.INBOX_DIR.iterdir()] == [dest.name]
+    assert not (env / ".7.oga.tmp").exists()
 
 
 def test_erros_de_rede_nao_vazam_o_token():
@@ -213,31 +369,49 @@ def test_erro_da_api_carrega_o_codigo():
 
 # --- polling --------------------------------------------------------------
 
-def test_polling_avanca_offset_e_publica_status(owner):
-    stop = threading.Event()
-    seen_params = []
+def _fake_api(stop, updates_per_call):
+    seen = []
 
     def fake_call(token, method, **kwargs):
         if method == "getMe":
             return {"username": "LogosBot"}
         if method == "getUpdates":
-            seen_params.append(kwargs)
-            if len(seen_params) == 1:
-                return [_update("ideia testar polling", message_id=9)]
-            stop.set()
-            return []
+            seen.append(kwargs)
+            if len(seen) > len(updates_per_call):
+                stop.set()
+                return []
+            return updates_per_call[len(seen) - 1]
         return {}
+
+    return fake_call, seen
+
+
+def test_polling_recupera_avanca_offset_e_publica_status(owner):
+    orfao = telegram.staging_dir() / "2026-09-13 10-00-00 tg 1"
+    orfao.mkdir(parents=True)
+    telegram.write_manifest(orfao, {"mensagens": [{"message_id": 1, "tipo": "texto", "texto": "de ontem"}]})
+    stop = threading.Event()
+    fake_call, seen = _fake_api(stop, [[_update("ideia testar polling", message_id=9)]])
 
     with patch.object(telegram, "call", side_effect=fake_call), \
          patch("logos.status.tracker.set_bot") as set_bot:
         Bot(TOKEN).run_polling(stop)
 
-    assert "offset" not in seen_params[0]
-    assert seen_params[1]["offset"] == 1010  # update_id 1009 + 1
-    assert seen_params[0]["allowed_updates"] == ["message"]
-    assert (config.INBOX_DIR / "2026-09-14 15-02-11 tg 9.txt").exists()
+    assert "2026-09-13 10-00-00 tg 1" in _inbox()
+    assert "offset" not in seen[0] and seen[1]["offset"] == 1010  # update_id 1009 + 1
+    assert seen[0]["allowed_updates"] == ["message"]
+    assert _staged() == ["2026-09-14 15-02-11 tg 9"]
     assert set_bot.call_args.args[0] == "polling"
-    assert set_bot.call_args.kwargs["username"] == "LogosBot"
+    assert set_bot.call_args.kwargs["session"] == "2026-09-14 15-02-11 tg 9"
+
+
+def test_polling_fecha_janela_vencida(owner, monkeypatch):
+    monkeypatch.setattr(config, "TELEGRAM_WINDOW_MIN", 0)
+    stop = threading.Event()
+    fake_call, _ = _fake_api(stop, [[_update("ideia rápida", message_id=9)]])
+    with patch.object(telegram, "call", side_effect=fake_call), patch("logos.status.tracker.set_bot"):
+        Bot(TOKEN).run_polling(stop)
+    assert _inbox() == ["2026-09-14 15-02-11 tg 9"]
 
 
 def test_polling_para_com_token_recusado(owner):
@@ -284,7 +458,7 @@ def test_send_imagem_vai_como_foto_com_legenda(owner, api, tmp_path):
     assert c.args[1] == "sendPhoto" and c.kwargs["caption"] == "Resumo do dia" and "photo" in c.kwargs["files"]
 
 
-def test_send_pdf_vai_como_documento(owner, api, tmp_path):
+def test_send_documento_sem_legenda(owner, api, tmp_path):
     doc = tmp_path / "briefing.md"
     doc.write_text("# briefing", encoding="utf-8")
     assert telegram.main(["send", "--file", str(doc)]) == 0

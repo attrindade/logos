@@ -37,6 +37,9 @@ class Entry:
     archive_path: str = ""
     error: str = ""
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    # Pacotes do Telegram: chave nome::hash do manifest, e ids das mensagens para achar a nota de uma resposta.
+    manifest_hash: str = ""
+    message_ids: list[int] = field(default_factory=list)
 
 
 class Ledger:
@@ -64,9 +67,35 @@ class Ledger:
     def key(filename: str, size: int) -> str:
         return f"{filename}::{size}"
 
+    @staticmethod
+    def bundle_key(name: str, manifest_hash: str) -> str:
+        return f"{name}::{manifest_hash}"
+
+    @classmethod
+    def key_for(cls, entry: Entry) -> str:
+        if entry.manifest_hash:
+            return cls.bundle_key(entry.filename, entry.manifest_hash)
+        return cls.key(entry.filename, entry.size)
+
     def get(self, filename: str, size: int) -> Optional[Entry]:
         raw = self._data.get(self.key(filename, size))
         return Entry(**raw) if raw else None
+
+    def get_bundle(self, name: str, manifest_hash: str) -> Optional[Entry]:
+        raw = self._data.get(self.bundle_key(name, manifest_hash))
+        return Entry(**raw) if raw else None
+
+    def is_processed_bundle(self, name: str, manifest_hash: str) -> bool:
+        entry = self.get_bundle(name, manifest_hash)
+        return entry is not None and entry.state == State.ENRICHED
+
+    def find_by_message_id(self, message_id: int) -> Optional[Entry]:
+        """Nota gerada a partir da mensagem do Telegram com esse id (a mais recente, se houver várias)."""
+        matches = [
+            Entry(**v) for v in self._data.values()
+            if message_id in v.get("message_ids", []) and v.get("note_path")
+        ]
+        return max(matches, key=lambda e: e.updated_at) if matches else None
 
     def is_processed(self, filename: str, size: int) -> bool:
         """Só ENRICHED conta como totalmente concluído. TRANSCRIBED é intermediário
@@ -77,7 +106,7 @@ class Ledger:
     def upsert(self, entry: Entry):
         with self._lock:
             entry.updated_at = datetime.now().isoformat()
-            self._data[self.key(entry.filename, entry.size)] = asdict(entry)
+            self._data[self.key_for(entry)] = asdict(entry)
             self._save()
 
     def failed_entries(self) -> list[Entry]:
@@ -85,7 +114,7 @@ class Ledger:
 
     def is_superseded(self, entry: Entry) -> bool:
         """FAILED de um tamanho menor que uma versão do mesmo arquivo já concluída."""
-        if entry.state != State.FAILED:
+        if entry.state != State.FAILED or entry.manifest_hash:
             return False
         return any(
             v["filename"] == entry.filename

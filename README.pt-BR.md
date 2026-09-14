@@ -87,8 +87,11 @@ O watcher também roda um bot Telegram numa thread (long polling, sem porta aber
    ```
    ou na variável de ambiente `LOGOS_TELEGRAM_TOKEN`. Nunca no `logos_config.yaml`.
 2. Relance o watcher e mande `/start` ao bot. O primeiro chat que fizer isso vira o dono (`telegram_chat_id` gravado no `secrets.yaml`); mensagens de qualquer outro chat são ignoradas e logadas.
-3. Texto vira `Inbox/AAAA-MM-DD HH-MM-SS tg <message_id>.txt`; voz vira `… tg <message_id>.oga`. O sufixo ` tg` define `canal: telegram`. Cada mensagem recebe uma resposta com o nome do arquivo.
-4. Os comandos `/tarefa`, `/ideia`, `/planejamento` e `/diario` prefixam a primeira palavra correspondente. `/nova` fica reservado para a janela de sessão. Arquivos acima do limite de 20 MB de download da Bot API são recusados com resposta.
+3. **Sessões viram pacotes.** Mensagens com menos de `telegram_window_min` (padrão 10) minutos entre si formam uma captura: texto, voz, fotos (álbuns inclusive), PDFs, documentos, links e localizações. O pacote é montado em `state/telegram/aberto/`; ao fechar (`/nova`, janela vencida ou reinício do watcher), a pasta inteira `AAAA-MM-DD HH-MM-SS tg <message_id>/`, com o `manifest.json`, é renomeada para a `Inbox/`. O sufixo ` tg` define `canal: telegram`. Cada mensagem recebe uma resposta curta: sessão aberta, ou quantas mensagens ela já tem.
+4. Os comandos `/tarefa`, `/ideia`, `/planejamento` e `/diario` prefixam a primeira palavra correspondente; `/nova` fecha a sessão na hora. Responder a uma mensagem antiga acrescenta o conteúdo à nota daquela mensagem (seção `## 📎 Resposta` no fim; o frontmatter não é tocado). Arquivos acima do limite de 20 MB de download da Bot API são recusados com resposta.
+5. **Uma nota por pacote.** Rota e categoria vêm do primeiro texto, voz ou legenda. Voz é transcrita; fotos passam por OCR (Tesseract, `ocr_langs: por+eng`) e, só quando o OCR não acha nada, por descrição do `vision_model` (padrão `llm_model`; lento em CPU; vazio desliga); PDFs usam a camada de texto, ou `ocrmypdf` quando escaneados; `.docx` via `python-docx`; links via `defuddle` se instalado, senão `trafilatura`; um `.md` enviado como documento é o texto da nota. Os anexos são copiados para `capturas/anexos/AAAA/MM/AAAA-MM-DD_HH-MM-SS_n.<ext>`, embutidos com caminho relativo ao vault (`![[…jpg|400]]`, `![[…pdf#page=1]]`), listados em `anexos:` e ganham um sidecar `<arquivo>.md` quando há texto extraído. Localização acrescenta `local:` e um link de mapa. Chave no ledger: `<nome do pacote>::<sha256 do manifest>`.
+
+Pré-requisitos de OCR (opcionais): Tesseract (`winget install UB-Mannheim.TesseractOCR`) e um `tessdata_dir` (padrão `<data_root>/models/tessdata`) com `por.traineddata`, `eng.traineddata`, `osd.traineddata` e a pasta `configs/` que o `ocrmypdf` exige.
 
 Capturas de Diário mandadas pelo Telegram passam pela nuvem do Telegram; o bot lembra disso quando a mensagem começa com "diário".
 
@@ -133,6 +136,9 @@ logos/
 ├── watcher.py            # Monitor residente de pastas e ciclo de retenção
 ├── lock.py               # Lock de instância única
 ├── status.py             # Status do pipeline em tempo real (state/status.json)
+├── telegram.py           # Bot Telegram (pacotes) e CLI send/check
+├── extractors.py         # OCR, visão, PDF, .docx e links dos anexos
+├── aw.py                 # Evento no ActivityWatch por captura
 └── prompts/              # Prompts por rota (Diario, Planejamento, Inbox)
 
 setup.py                  # Instalador e configurador TUI interativo

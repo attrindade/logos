@@ -92,8 +92,11 @@ The watcher also runs a Telegram bot in a background thread (long polling, no op
    ```
    or set the `LOGOS_TELEGRAM_TOKEN` environment variable. Never put it in `logos_config.yaml`.
 2. Restart the watcher and send `/start` to the bot. The first chat that does so becomes the owner (`telegram_chat_id` is saved in `secrets.yaml`); messages from any other chat are ignored and logged.
-3. Text becomes `Inbox/YYYY-MM-DD HH-MM-SS tg <message_id>.txt`, voice becomes `… tg <message_id>.oga`. The ` tg` suffix sets `canal: telegram`. Each message gets a reply with the file name.
-4. Commands `/tarefa`, `/ideia`, `/planejamento`, `/diario` prefix the matching first word. `/nova` is reserved for session windows. Files above the Bot API's 20 MB download limit are refused with a reply.
+3. **Sessions become bundles.** Messages less than `telegram_window_min` (default 10) minutes apart form one capture: text, voice, photos (albums included), PDFs, documents, links and locations. The bundle is assembled in `state/telegram/aberto/`; when it closes (`/nova`, the window expiring, or a watcher restart) the whole folder `YYYY-MM-DD HH-MM-SS tg <message_id>/`, with its `manifest.json`, is renamed into `Inbox/`. The ` tg` suffix sets `canal: telegram`. Each message gets a short reply: session opened, or how many messages it holds.
+4. Commands `/tarefa`, `/ideia`, `/planejamento`, `/diario` prefix the matching first word; `/nova` closes the session now. Replying to an older message adds its content to that message's note (a `## 📎 Resposta` section at the end; the frontmatter is not touched). Files above the Bot API's 20 MB download limit are refused with a reply.
+5. **One note per bundle.** Route and category come from the first text, voice or caption. Voice is transcribed; photos go through OCR (Tesseract, `ocr_langs: por+eng`) and, only when OCR finds nothing, a description by `vision_model` (default `llm_model`; slow on CPU; empty disables); PDFs use their text layer, or `ocrmypdf` when scanned; `.docx` via `python-docx`; links via `defuddle` when installed, otherwise `trafilatura`; a `.md` sent as a document is the note text. Attachments are copied to `capturas/anexos/YYYY/MM/YYYY-MM-DD_HH-MM-SS_n.<ext>`, embedded with vault-relative paths (`![[…jpg|400]]`, `![[…pdf#page=1]]`), listed in `anexos:`, and get a `<file>.md` sidecar when text was extracted. Locations add `local:` and a map link. Ledger key: `<bundle name>::<sha256 of manifest>`.
+
+OCR prerequisites (optional): Tesseract (`winget install UB-Mannheim.TesseractOCR`) and a `tessdata_dir` (default `<data_root>/models/tessdata`) holding `por.traineddata`, `eng.traineddata`, `osd.traineddata` and the `configs/` folder that `ocrmypdf` needs.
 
 Diário captures sent through Telegram go through Telegram's cloud; the bot reminds you when a message starts with "diário".
 
@@ -138,6 +141,9 @@ logos/
 ├── watcher.py            # Real-time directory observer and daily retention manager
 ├── lock.py               # Single-instance lock file
 ├── status.py             # Live pipeline status (state/status.json)
+├── telegram.py           # Telegram bot (bundles) and send/check CLI
+├── extractors.py         # OCR, vision, PDF, .docx and link text for attachments
+├── aw.py                 # ActivityWatch event per capture
 └── prompts/              # Route prompt templates (diario.txt, planejamento.txt, inbox.txt)
 
 setup.py                  # Interactive TUI installer & diagnostic assistant

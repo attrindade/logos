@@ -1,4 +1,4 @@
-"""Bot Telegram do Logos: captura de texto e voz por long polling, e envio pela linha de comando.
+"""Bot Telegram do Logos: captura multimodal por long polling, e envio pela linha de comando.
 
 Contrato com os jobs do vault (sessões A e C), a partir da raiz do repo com o .venv:
 
@@ -11,22 +11,32 @@ Decisões:
 - `requests` puro, não `python-telegram-bot`. A PTB 22 é só asyncio: numa thread do watcher
   exigiria um event loop próprio, e o `send` montaria uma Application para uma mensagem.
   Long polling é um laço de `getUpdates`; `getFile`, `reply_to_message` e `media_group_id`
-  (Etapa 4) são campos simples da API.
+  são campos simples da API.
 - Thread dentro do processo do watcher, não segundo processo: um lock, um log, um relançamento,
   e um único escritor do status.json (o StatusTracker regrava o arquivo inteiro).
 - Este módulo não importa `logos.status` no topo: o `send` roda enquanto o watcher está vivo e
   não pode sobrescrever o status.json dele.
 
-O bot só escreve na Inbox, sempre por temporário com ponto + rename; quem gera a nota é o
-pipeline. Nome: `YYYY-MM-DD HH-MM-SS tg <message_id>.<ext>`. O sufixo `tg` marca `canal: telegram`
-e o `message_id` evita colisão no mesmo segundo e duplicata quando o Telegram reentrega updates.
+Pacotes (Etapa 4): mensagens com menos de `telegram_window_min` entre si formam uma captura. O
+pacote é montado em `state/telegram/aberto/<nome>/` (manifest.json regravado a cada mensagem) e,
+ao fechar, a pasta inteira é renomeada para a Inbox: o watcher só vê pacotes completos e nada é
+movido dentro da Inbox. Fecha com /nova, com a janela vencida (checada a cada volta do polling,
+no máximo 30 s de atraso) ou no início do bot (pacotes que uma queda ou reinício deixou abertos).
+Nome: `YYYY-MM-DD HH-MM-SS tg <message_id da primeira mensagem>`; o sufixo `tg` marca
+`canal: telegram` e o id evita colisão no mesmo segundo. Uma resposta a mensagem fora do pacote
+aberto vira pacote próprio, fechado na hora, com `reply_to`: o pipeline anexa o conteúdo à nota
+original, achada pelo message_id no ledger.
 """
 import argparse
+import json
 import logging
 import mimetypes
 import os
+import shutil
 import sys
 import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -47,21 +57,35 @@ MAX_PHOTO_BYTES = 10 * 1024 * 1024
 MESSAGE_LIMIT = 4096
 CAPTION_LIMIT = 1024
 PHOTO_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+MANIFEST = "manifest.json"
+MANIFEST_VERSION = 1
 
 EXIT_OK, EXIT_FAILED, EXIT_NOT_CONFIGURED = 0, 1, 2
 
 # comando -> primeira palavra que a triagem entende
 PREFIX_COMMANDS = {"tarefa": "tarefa", "ideia": "ideia", "planejamento": "planejamento", "diario": "diário"}
+KIND_LABELS = {
+    "texto": "texto", "voz": "voz", "audio": "áudio", "foto": "foto",
+    "documento": "documento", "localizacao": "localização",
+}
 
 DIARIO_AVISO = (
     "Lembrete: Diário pelo Telegram passa pela nuvem do Telegram. "
     "O caminho do Diário continua sendo o gravador + Syncthing."
 )
-AJUDA = (
-    "Mande texto ou voz; cada mensagem vira uma nota.\n"
-    "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
-    "/nova fecha a sessão (a partir da Etapa 4)"
-)
+
+
+def _fmt_min(value: float) -> str:
+    return f"{value:g}"
+
+
+def _ajuda() -> str:
+    return (
+        "Mande texto, voz, foto, PDF, documento, link ou localização. Mensagens com até "
+        f"{_fmt_min(config.TELEGRAM_WINDOW_MIN)} min de intervalo viram uma nota só.\n"
+        "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
+        "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela."
+    )
 
 
 class TelegramError(Exception):
@@ -155,12 +179,85 @@ def download_file(token: str, file_id: str, dest: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Captura
+# Pacotes
 # ---------------------------------------------------------------------------
 
-def capture_name(message: dict, ext: str) -> str:
+def staging_dir() -> Path:
+    return config.STATE_DIR / "telegram" / "aberto"
+
+
+def bundle_name(message: dict) -> str:
     stamp = datetime.fromtimestamp(message["date"]).strftime("%Y-%m-%d %H-%M-%S")
-    return f"{stamp} {TELEGRAM_TAG} {message['message_id']}{ext}"
+    return f"{stamp} {TELEGRAM_TAG} {message['message_id']}"
+
+
+def _iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
+
+
+def load_manifest(directory: Path) -> dict | None:
+    try:
+        data = json.loads((directory / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_manifest(directory: Path, manifest: dict) -> None:
+    """Serialização determinística: o hash do manifest compõe a chave do pacote no ledger."""
+    tmp = directory / f".{MANIFEST}.tmp"
+    tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, directory / MANIFEST)
+
+
+def finalize_bundle(directory: Path, manifest: dict, reason: str) -> Path:
+    """Fecha o pacote e o entrega à Inbox com um rename da pasta inteira."""
+    manifest["fechado_em"] = datetime.now().isoformat(timespec="seconds")
+    manifest["motivo_fechamento"] = reason
+    write_manifest(directory, manifest)
+
+    dest = config.INBOX_DIR / directory.name
+    if dest.exists():
+        delivered = load_manifest(dest) or {}
+        delivered_ids = {m.get("message_id") for m in delivered.get("mensagens", [])}
+        if {m["message_id"] for m in manifest["mensagens"]} <= delivered_ids:
+            logger.info(f"Telegram: {directory.name} já tinha sido entregue; cópia do staging descartada")
+            shutil.rmtree(directory, ignore_errors=True)
+            return dest
+        k = 2
+        while (config.INBOX_DIR / f"{directory.name} {k}").exists():
+            k += 1
+        dest = config.INBOX_DIR / f"{directory.name} {k}"
+
+    try:
+        os.replace(directory, dest)
+    except OSError:
+        shutil.move(str(directory), str(dest))  # outro volume: o watcher espera o pacote ficar completo
+    logger.info(f"Telegram: pacote {dest.name} entregue à Inbox ({len(manifest['mensagens'])} mensagens, {reason})")
+    return dest
+
+
+def _utf16_slice(text: str, offset: int, length: int) -> str:
+    """Offsets de entidades do Telegram são em unidades UTF-16."""
+    data = text.encode("utf-16-le")
+    return data[2 * offset: 2 * (offset + length)].decode("utf-16-le", errors="ignore")
+
+
+def _links(message: dict) -> list[str]:
+    text = message.get("text") or message.get("caption") or ""
+    entities = message.get("entities") or message.get("caption_entities") or []
+    urls = []
+    for entity in entities:
+        if entity.get("type") == "url":
+            urls.append(_utf16_slice(text, entity["offset"], entity["length"]))
+        elif entity.get("type") == "text_link" and entity.get("url"):
+            urls.append(entity["url"])
+    return list(dict.fromkeys(urls))
+
+
+def _media_ext(media: dict, default: str) -> str:
+    suffix = Path(media.get("file_name") or "").suffix.lower()
+    return suffix or mimetypes.guess_extension(media.get("mime_type") or "") or default
 
 
 def _parse_command(text: str) -> tuple[str, str]:
@@ -177,20 +274,29 @@ def _starts_with_diario(text: str) -> bool:
     return bool(words) and _normalize_word(words[0]) in ("diario", "diarios")
 
 
-def _audio_ext(message: dict, media: dict) -> str:
-    if message.get("voice"):
-        return ".oga"
-    suffix = Path(media.get("file_name") or "").suffix
-    return suffix or mimetypes.guess_extension(media.get("mime_type") or "") or ".audio"
+@dataclass
+class Session:
+    directory: Path
+    manifest: dict
+    last_at: float
+
+    @property
+    def name(self) -> str:
+        return self.directory.name
+
+    @property
+    def ids(self) -> set[int]:
+        return {m["message_id"] for m in self.manifest["mensagens"]}
+
+    @property
+    def size(self) -> int:
+        return len(self.manifest["mensagens"])
 
 
 class Bot:
     def __init__(self, token: str):
         self.token = token
-
-    @property
-    def inbox(self) -> Path:
-        return config.INBOX_DIR
+        self.session: Session | None = None
 
     def reply(self, message: dict, text: str) -> None:
         try:
@@ -215,7 +321,7 @@ class Bot:
             if command == "start":
                 save_secrets({"telegram_chat_id": chat_id})
                 logger.info(f"Telegram: dono registrado, chat_id={chat_id}")
-                self.reply(message, "Logos conectado a este chat. Mande texto ou voz.\n\n" + AJUDA)
+                self.reply(message, "Logos conectado a este chat.\n\n" + _ajuda())
             else:
                 logger.warning(f"Telegram: mensagem ignorada, dono ainda não registrado (chat_id={chat_id}). Mande /start.")
             return
@@ -226,63 +332,183 @@ class Bot:
         try:
             if command:
                 self._handle_command(message, command, rest)
-            elif text:
-                self._capture_text(message, text)
-            elif message.get("voice") or message.get("audio"):
-                self._capture_audio(message, message.get("voice") or message.get("audio"))
             else:
-                self.reply(message, "Por enquanto só texto e voz. Foto, PDF e documentos chegam na Etapa 4.")
+                self._capture(message)
         except Exception:
             logger.exception(f"Telegram: falha ao capturar a mensagem {message.get('message_id')}")
             self.reply(message, "⚠️ Não consegui salvar esta mensagem. Reenvie, por favor.")
 
     def _handle_command(self, message: dict, command: str, rest: str) -> None:
         if command == "start":
-            self.reply(message, "Logos já está conectado a este chat.\n\n" + AJUDA)
+            self.reply(message, "Logos já está conectado a este chat.\n\n" + _ajuda())
         elif command in PREFIX_COMMANDS:
             if not rest:
                 self.reply(message, f"Uso: /{command} <texto>")
                 return
-            self._capture_text(message, f"{PREFIX_COMMANDS[command]} {rest}")
+            self._capture(message, text=f"{PREFIX_COMMANDS[command]} {rest}")
         elif command == "nova":
-            self.reply(message, "Anotado. A janela de sessão chega na Etapa 4; hoje cada mensagem já vira uma nota.")
+            if self.session is None:
+                self.reply(message, "Nenhuma sessão aberta.")
+                return
+            name, size = self.session.name, self.session.size
+            self._close(self.session, "nova")
+            self.reply(message, f"✅ Sessão fechada com {size} mensagem(ns): {name}. A nota sai em seguida.")
         else:
-            self.reply(message, AJUDA)
+            self.reply(message, _ajuda())
 
-    def _capture_text(self, message: dict, text: str) -> None:
-        name = capture_name(message, ".txt")
-        dest = self.inbox / name
-        if dest.exists():
-            logger.info(f"Telegram: reentrega ignorada, {name} já existe")
-        else:
-            tmp = dest.with_name(f".{name}.tmp")
-            tmp.write_text(text + "\n", encoding="utf-8")
-            os.replace(tmp, dest)
-            logger.info(f"Telegram: texto salvo em {name}")
-        ack = f"📥 {name}"
-        if _starts_with_diario(text):
-            ack += "\n" + DIARIO_AVISO
-        self.reply(message, ack)
+    @staticmethod
+    def _classify(message: dict, text: str) -> tuple[str | None, dict | None, str]:
+        if text:
+            return "texto", None, ""
+        if message.get("voice"):
+            return "voz", message["voice"], ".oga"
+        if message.get("audio"):
+            return "audio", message["audio"], _media_ext(message["audio"], ".audio")
+        if message.get("photo"):
+            return "foto", message["photo"][-1], ".jpg"  # último tamanho = maior resolução
+        if message.get("document"):
+            return "documento", message["document"], _media_ext(message["document"], ".bin")
+        if message.get("location"):
+            return "localizacao", None, ""
+        return None, None, ""
 
-    def _capture_audio(self, message: dict, media: dict) -> None:
-        size = media.get("file_size") or 0
+    def _capture(self, message: dict, text: str | None = None) -> None:
+        text = text if text is not None else (message.get("text") or "").strip()
+        kind, media, ext = self._classify(message, text)
+        if kind is None:
+            self.reply(message, "Tipo de mensagem não suportado. Mande texto, voz, foto, documento ou localização.")
+            return
+        size = (media or {}).get("file_size") or 0
         if size > MAX_DOWNLOAD_BYTES:
             self.reply(
                 message,
-                f"Áudio de {size / 1024 / 1024:.1f} MB passa do limite de 20 MB da Bot API. Mande pelo gravador + Syncthing.",
+                f"Arquivo de {size / 1024 / 1024:.1f} MB passa do limite de 20 MB da Bot API. "
+                "Mande pelo Syncthing ou por link do Drive.",
             )
             return
-        name = capture_name(message, _audio_ext(message, media))
-        dest = self.inbox / name
-        if dest.exists():
-            logger.info(f"Telegram: reentrega ignorada, {name} já existe")
+        label = KIND_LABELS[kind]
+        aviso = "\n" + DIARIO_AVISO if _starts_with_diario(text or message.get("caption") or "") else ""
+
+        reply_to = (message.get("reply_to_message") or {}).get("message_id")
+        if reply_to is not None and not (self.session and reply_to in self.session.ids):
+            session = self._open(message, reply_to=reply_to)
+            self._add(session, message, kind, media, ext, text)
+            self._close(session, "resposta")
+            self.reply(message, f"📎 {label} registrado como resposta ({session.name}). Complementa a nota da mensagem original." + aviso)
+            return
+
+        self.expire_if_idle()
+        opened = self.session is None
+        if opened:
+            self.session = self._open(message)
+        self._add(self.session, message, kind, media, ext, text)
+        if opened:
+            ack = (
+                f"📥 {label} · sessão aberta ({self.session.name}). "
+                f"Fecha após {_fmt_min(config.TELEGRAM_WINDOW_MIN)} min sem mensagens ou com /nova."
+            )
         else:
-            download_file(self.token, media["file_id"], dest)
-            logger.info(f"Telegram: voz salva em {name}")
-        self.reply(message, f"📥 {name}")
+            ack = f"📥 {label} · {self.session.size} na sessão"
+        self.reply(message, ack + aviso)
+
+    def _open(self, message: dict, reply_to: int | None = None) -> Session:
+        directory = staging_dir() / bundle_name(message)
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = load_manifest(directory) or {
+            "versao": MANIFEST_VERSION,
+            "pacote": directory.name,
+            "chat_id": message["chat"]["id"],
+            "aberto_em": _iso(message["date"]),
+            "mensagens": [],
+        }
+        if reply_to is not None:
+            manifest["reply_to"] = reply_to
+        return Session(directory, manifest, time.time())
+
+    def _add(self, session: Session, message: dict, kind: str, media: dict | None, ext: str, text: str) -> bool:
+        message_id = message["message_id"]
+        if message_id in session.ids:
+            logger.info(f"Telegram: reentrega ignorada, mensagem {message_id} já está em {session.name}")
+            return False
+        entry = {"message_id": message_id, "date": _iso(message["date"]), "tipo": kind}
+        if text:
+            entry["texto"] = text
+        caption = (message.get("caption") or "").strip()
+        if caption:
+            entry["legenda"] = caption
+        if media is not None:
+            filename = f"{message_id}{ext}"
+            download_file(self.token, media["file_id"], session.directory / filename)
+            entry["arquivo"] = filename
+            if media.get("file_name"):
+                entry["nome_original"] = media["file_name"]
+            if media.get("mime_type"):
+                entry["mime"] = media["mime_type"]
+        if kind == "localizacao":
+            location = message["location"]
+            local = {"lat": location["latitude"], "lon": location["longitude"]}
+            venue = message.get("venue") or {}
+            if venue.get("title"):
+                local["titulo"] = venue["title"]
+            if venue.get("address"):
+                local["endereco"] = venue["address"]
+            entry["local"] = local
+        if message.get("media_group_id"):
+            entry["media_group_id"] = message["media_group_id"]
+        reply_to = (message.get("reply_to_message") or {}).get("message_id")
+        if reply_to is not None:
+            entry["reply_to"] = reply_to
+        links = _links(message)
+        if links:
+            entry["links"] = links
+
+        session.manifest["mensagens"].append(entry)
+        session.last_at = time.time()
+        write_manifest(session.directory, session.manifest)
+        logger.info(f"Telegram: {kind} adicionado a {session.name}")
+        return True
+
+    def _close(self, session: Session, reason: str) -> None:
+        if session is self.session:
+            self.session = None
+        finalize_bundle(session.directory, session.manifest, reason)
+
+    def expire_if_idle(self, now: float | None = None) -> str | None:
+        """Fecha a sessão aberta se a janela venceu. Devolve o nome do pacote fechado."""
+        if self.session is None:
+            return None
+        now = time.time() if now is None else now
+        if now - self.session.last_at < config.TELEGRAM_WINDOW_MIN * 60:
+            return None
+        name = self.session.name
+        self._close(self.session, "janela")
+        return name
+
+    def recover(self) -> list[str]:
+        """Entrega à Inbox os pacotes que uma queda ou reinício deixou abertos no staging."""
+        root = staging_dir()
+        if not root.is_dir():
+            return []
+        closed = []
+        for directory in sorted(p for p in root.iterdir() if p.is_dir()):
+            manifest = load_manifest(directory)
+            if not manifest or not manifest.get("mensagens"):
+                logger.warning(f"Telegram: pacote vazio descartado do staging: {directory.name}")
+                shutil.rmtree(directory, ignore_errors=True)
+                continue
+            finalize_bundle(directory, manifest, "reinicio")
+            closed.append(directory.name)
+        return closed
 
     def run_polling(self, stop: threading.Event) -> None:
         from .status import tracker  # só no processo do watcher
+
+        try:
+            recovered = self.recover()
+            if recovered:
+                logger.info(f"Telegram: {len(recovered)} pacote(s) aberto(s) antes do reinício entregue(s) à Inbox")
+        except Exception:
+            logger.exception("Telegram: falha ao recuperar pacotes do staging")
 
         username = None
         offset = None
@@ -297,13 +523,15 @@ class Bot:
                     params["offset"] = offset
                 updates = call(self.token, "getUpdates", http_timeout=POLL_TIMEOUT_S + 5, **params)
                 backoff = 1
-                tracker.set_bot(
-                    "polling", username=username, owner_registered=get_owner_chat_id() is not None,
-                    last_poll=datetime.now().isoformat(), last_error=None,
-                )
                 for update in updates:
                     offset = update["update_id"] + 1  # avança mesmo se falhar: não travar numa mensagem
                     self.handle_update(update)
+                self.expire_if_idle()
+                tracker.set_bot(
+                    "polling", username=username, owner_registered=get_owner_chat_id() is not None,
+                    session=self.session.name if self.session else None,
+                    last_poll=datetime.now().isoformat(), last_error=None,
+                )
             except TelegramError as e:
                 if e.code == 401:
                     logger.error("Telegram: token recusado (401). Bot desligado até corrigir o secrets.yaml e relançar.")
