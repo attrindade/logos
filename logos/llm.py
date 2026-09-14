@@ -106,11 +106,101 @@ def enrich(transcript: str, route: Route, model: str = None) -> dict:
         consolidation_input = "\n\n".join(partial_summaries)
         raw = _ollama_generate(prompt_template.format(transcript=consolidation_input), model=model)
 
+    return parse_enrichment(raw)
+
+
+# Campos que o writer trata como lista. A LLM às vezes escreve `- [[PPJ]]` sem aspas, que o
+# YAML lê como lista aninhada ([["PPJ"]]) e o writer despejaria como `- - - PPJ`.
+_LIST_FIELDS = (
+    "tags", "pessoas", "projetos", "acoes", "decisoes", "bloqueios", "vitorias",
+    "gratidao", "tensoes", "pontos", "takeaways",
+)
+_ENTITY_FIELDS = ("pessoas", "projetos")
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|]+)(?:\|[^\[\]]*)?\]\]")
+
+
+def _known_entities() -> tuple[set[str], dict[str, str]]:
+    """Grafias exatas das entidades do Contexto de Referência dos prompts e, por minúsculas,
+    a primeira grafia citada. Lidas dos próprios prompts para acompanhar qualquer edição neles."""
+    exact: set[str] = set()
+    by_lower: dict[str, str] = {}
+    for filename in _PROMPT_FILES.values():
+        for m in _WIKILINK_RE.finditer((_PROMPTS_DIR / filename).read_text(encoding="utf-8")):
+            name = m.group(1).strip()
+            exact.add(name)
+            by_lower.setdefault(name.lower(), name)
+    return exact, by_lower
+
+
+def _is_yaml_wikilink(value) -> bool:
+    """`[[Nome]]` sem aspas vira [["Nome"]] no safe_load."""
+    return (
+        isinstance(value, list) and len(value) == 1
+        and isinstance(value[0], list) and len(value[0]) == 1
+        and isinstance(value[0][0], str)
+    )
+
+
+def _flatten(value, as_wikilink: bool) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    if as_wikilink and _is_yaml_wikilink(value):
+        return [f"[[{value[0][0].strip()}]]"]
+    if isinstance(value, (list, tuple)):
+        return [item for v in value for item in _flatten(v, as_wikilink)]
+    if isinstance(value, dict):
+        return [item for v in value.values() for item in _flatten(v, as_wikilink)]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _normalize_tag(tag: str) -> str:
+    tag = tag.strip().strip("[]").strip().lstrip("#").strip().lower()
+    return re.sub(r"\s+", "-", tag)  # tag do Obsidian não aceita espaço
+
+
+def _canonical_entity(item: str, known: tuple[set[str], dict[str, str]]) -> str:
+    exact, by_lower = known
+
+    def fix(m: re.Match) -> str:
+        name = m.group(1).strip()
+        if name in exact:
+            return f"[[{name}]]"  # grafia exata existe (ex.: Minimundo e minimundo são entidades distintas)
+        return f"[[{by_lower.get(name.lower(), name)}]]"
+
+    return _WIKILINK_RE.sub(fix, item)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(i for i in items if i))
+
+
+def normalize_enrichment(data: dict) -> dict:
+    """Achata listas aninhadas, limpa tags (minúsculas, sem #) e restaura a grafia canônica dos
+    wikilinks de pessoas e projetos. Nomes sem wikilink ficam como estão: o prompt manda deixar
+    texto simples quando a entidade é ambígua (ex.: "Vini")."""
+    known = _known_entities()
+    result = dict(data)
+    for field in _LIST_FIELDS:
+        if field not in result:
+            continue
+        items = _flatten(result[field], as_wikilink=field in _ENTITY_FIELDS or field == "tags")
+        if field == "tags":
+            items = [_normalize_tag(t) for t in items]
+        elif field in _ENTITY_FIELDS:
+            items = [_canonical_entity(i, known) for i in items]
+        result[field] = _dedupe(items)
+    return result
+
+
+def parse_enrichment(raw: str) -> dict:
     raw = _strip_yaml_fences(raw)
     try:
         parsed = yaml.safe_load(raw)
         if isinstance(parsed, dict):
-            return parsed
+            return normalize_enrichment(parsed)
     except Exception as e:
         logger.warning(f"Falha no safe_load do YAML: {e}. Tentando extração resiliente.")
 
@@ -127,5 +217,5 @@ def enrich(transcript: str, route: Route, model: str = None) -> dict:
     fallback.setdefault("titulo", "Nota de voz")
     fallback.setdefault("tags", [])
     fallback.setdefault("resumo", raw[:500])
-    return fallback
+    return normalize_enrichment(fallback)
 

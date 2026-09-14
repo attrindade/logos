@@ -55,6 +55,12 @@ def process_file(path: Path, ledger: Ledger) -> None:
         try:
             transcript = transcribe_file(path)
         except Exception as e:
+            if is_incomplete_file_error(e):
+                # Syncthing entregou uma versão parcial enquanto o gravador ainda escrevia.
+                # Não é falha: quando o tamanho mudar, o watcher chama process_file de novo.
+                logger.info(f"Arquivo incompleto (sincronização parcial), aguardando nova versão: {path.name} ({size} bytes)")
+                tracker.set_idle()
+                return
             t_initial = triage(path.name)
             logger.error(f"Falha na transcrição de {path.name}: {e}")
             ledger.upsert(Entry(
@@ -133,9 +139,18 @@ def process_file(path: Path, ledger: Ledger) -> None:
     )
 
 
+def is_incomplete_file_error(error: Exception) -> bool:
+    """MP4/M4A sem o átomo moov: o arquivo ainda não terminou de ser escrito/sincronizado."""
+    return "moov atom not found" in str(error)
+
+
 def retry_failed(ledger: Ledger) -> None:
-    """Reenfileira entradas com estado FAILED."""
+    """Reenfileira entradas com estado FAILED, exceto as já superadas por uma versão maior
+    do mesmo arquivo que chegou a ENRICHED (fantasmas de sincronização parcial)."""
     for entry in ledger.failed_entries():
+        if ledger.is_superseded(entry):
+            logger.debug(f"Ignorando falha obsoleta ({entry.size} bytes): {entry.filename}")
+            continue
         path = config.INBOX_DIR / entry.filename
         if path.exists():
             logger.info(f"Reprocessando arquivo que falhou antes: {entry.filename}")

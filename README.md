@@ -37,10 +37,11 @@ chmod +x install.sh
    - **Linux (Debian/Ubuntu):** `sudo apt update && sudo apt install ffmpeg`.
    - **Arch Linux:** `sudo pacman -S ffmpeg`.
 3. **[Ollama](https://ollama.com)** (for local LLM inference and structuring):
-   - Install Ollama and pull the recommended lightweight instruct model:
+   - Install Ollama and pull the default model:
      ```bash
-     ollama pull gemma4:26b
+     ollama pull gemma4:e4b
      ```
+   - Optional: `gemma4:26b` (~18 GB) extracts entities better but is several times slower on CPU. Set `llm_model: "gemma4:26b"` to use it.
 
 ---
 
@@ -64,6 +65,10 @@ Once setup is complete, start the background resident watcher:
 # Linux
 .venv/bin/python main.py
 ```
+
+Only one watcher runs at a time: `main.py` holds `state/logos.lock` with its PID and exits if another live instance owns it.
+
+Maintenance: `python main.py --limpar-fantasmas` removes ledger failures left by partial syncs of a file whose complete version was already processed (a backup of `ledger.json` is written first).
 
 ### What happens in the pipeline:
 1. **Inbox Scan & Watcher:** Detects incoming voice recordings while ensuring write stability.
@@ -97,6 +102,8 @@ logos/
 ├── writer.py             # Markdown note generator and archive manager
 ├── pipeline.py           # End-to-end orchestrator (STT -> LLM -> Writer)
 ├── watcher.py            # Real-time directory observer and daily retention manager
+├── lock.py               # Single-instance lock file
+├── status.py             # Live pipeline status (state/status.json)
 └── prompts/              # Route prompt templates (diario.txt, planejamento.txt, inbox.txt)
 
 setup.py                  # Interactive TUI installer & diagnostic assistant
@@ -119,6 +126,7 @@ whisper_compute_type: "int8"
 whisper_cpu_threads: 6
 whisper_language: "pt"
 ollama_host: "http://localhost:11434"
-llm_model: "gemma4:26b"
+ollama_keep_alive: "10m"   # keeps the model loaded between notes
+llm_model: "gemma4:e4b"    # optional: gemma4:26b
 archive_retention_days: 60
 ```

@@ -27,10 +27,8 @@ class Triage:
 
 
 def is_ignored(filename: str) -> bool:
-    """Arquivos que começam com '.' são metadados do Syncthing/app, nunca áudio a processar
-    — exceto os .evr_recently_deleted_*, que SÃO áudio real."""
-    if filename.startswith(".evr_recently_deleted_"):
-        return False
+    """Arquivos que começam com '.' são metadados do Syncthing/app e nunca viram nota.
+    Inclui .evr_recently_deleted_*: é a lixeira do Easy Voice Recorder, áudio que o dono apagou."""
     return filename.startswith(".")
 
 

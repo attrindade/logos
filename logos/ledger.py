@@ -5,6 +5,10 @@ do Syncthing, que reintroduz arquivos antigos, seja reconhecido como já process
 
 Entradas nunca são apagadas, nem quando o áudio expira do Archive (§2.3) — remover a
 entrada permitiria retranscrição e nota duplicada caso o arquivo reapareça na Inbox.
+
+Única exceção: `remove_superseded_failures()` apaga entradas FAILED de versões parciais de um
+arquivo cuja versão maior já foi concluída. Essas chaves (nome + tamanho parcial) nunca
+voltam a existir na Inbox, então apagá-las não reabre a porta para duplicatas.
 """
 import json
 import threading
@@ -78,6 +82,27 @@ class Ledger:
 
     def failed_entries(self) -> list[Entry]:
         return [Entry(**v) for v in self._data.values() if v["state"] == State.FAILED]
+
+    def is_superseded(self, entry: Entry) -> bool:
+        """FAILED de um tamanho menor que uma versão do mesmo arquivo já concluída."""
+        if entry.state != State.FAILED:
+            return False
+        return any(
+            v["filename"] == entry.filename
+            and v["state"] in (State.ENRICHED, State.ARCHIVE_EXPIRED)
+            and v["size"] > entry.size
+            for v in self._data.values()
+        )
+
+    def remove_superseded_failures(self) -> list[str]:
+        """Apaga as entradas FAILED superadas e devolve as chaves removidas."""
+        with self._lock:
+            stale = [k for k, v in self._data.items() if self.is_superseded(Entry(**v))]
+            for k in stale:
+                del self._data[k]
+            if stale:
+                self._save()
+        return stale
 
     def entries_for_expiry(self, before: datetime) -> list[Entry]:
         result = []

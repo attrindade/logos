@@ -188,7 +188,7 @@ def step_setup_whisper(data_root: str):
 def step_setup_ollama(ollama_models: list[str]):
     console.print("\n[bold cyan]4. LLM Configuration (Ollama)[/bold cyan]")
     
-    default_model = "gemma4:26b"
+    default_model = "gemma4:e4b"
     
     if ollama_models:
         console.print(f"[dim]Models detected in your local Ollama: {', '.join(ollama_models)}[/dim]")
@@ -197,7 +197,8 @@ def step_setup_ollama(ollama_models: list[str]):
     else:
         console.print(
             f"[dim]We recommend [bold cyan]{default_model}[/bold cyan] for optimal speed,\n"
-            f"structured YAML adherence, and low RAM/disk footprint (~2.0 GB).[/dim]"
+            f"structured YAML adherence, and CPU-only machines (~9.6 GB).\n"
+            f"gemma4:26b (~18 GB) is optional: better entities, much slower on CPU.[/dim]"
         )
 
     console.print(f"[dim]Press Enter to accept the default recommended model, or type another.[/dim]\n")
@@ -241,7 +242,7 @@ def save_config(data_root: str, whisper_dir: str, whisper_size: str, llm_model: 
         "whisper_vad_filter": True,
         "ollama_host": "http://localhost:11434",
         "ollama_num_ctx": 8192,
-        "ollama_keep_alive": "0",
+        "ollama_keep_alive": "10m",
         "llm_model": llm_model,
         "chunk_token_threshold": 6500,
         "archive_retention_days": 60,

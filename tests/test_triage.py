@@ -39,8 +39,8 @@ def main():
 
     # --- Nomes especiais e lixo do Syncthing ---
     results.append(check(
-        not is_ignored(".evr_recently_deleted_(1787537285279)2026-08-23 23-07-27.m4a"),
-        ".evr_recently_deleted_* NÃO é ignorado (é áudio real)",
+        is_ignored(".evr_recently_deleted_(1787537285279)2026-08-23 23-07-27.m4a"),
+        ".evr_recently_deleted_* é ignorado (lixeira do gravador: áudio apagado no celular)",
     ))
     results.append(check(is_ignored(".nomedia"), ".nomedia é ignorado"))
     results.append(check(is_ignored(".stfolder"), ".stfolder é ignorado"))

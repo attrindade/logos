@@ -31,10 +31,11 @@ chmod +x install.sh
    - **Linux (Debian/Ubuntu):** `sudo apt update && sudo apt install ffmpeg`.
    - **Arch Linux:** `sudo pacman -S ffmpeg`.
 3. **[Ollama](https://ollama.com)** (para inferência e sumarização local):
-   - Instale o Ollama e baixe o modelo sugerido:
+   - Instale o Ollama e baixe o modelo padrão:
      ```bash
-     ollama pull gemma4:26b
+     ollama pull gemma4:e4b
      ```
+   - Opcional: `gemma4:26b` (~18 GB) extrai entidades melhor, mas é várias vezes mais lento em CPU. Para usar, `llm_model: "gemma4:26b"`.
 
 ---
 
@@ -58,6 +59,10 @@ Após rodar o instalador:
 # Linux
 .venv/bin/python main.py
 ```
+
+Só um watcher roda por vez: o `main.py` guarda o PID em `state/logos.lock` e sai se outra instância viva já detém o lock.
+
+Manutenção: `python main.py --limpar-fantasmas` remove do ledger as falhas deixadas por sincronizações parciais de um arquivo cuja versão completa já foi processada (grava antes um backup do `ledger.json`).
 
 O Logos iniciará o processo residente (*watcher*):
 1. Faz varredura da pasta `Inbox/` inicial e retoma pendências se houver.
@@ -92,6 +97,8 @@ logos/
 ├── writer.py             # Criação da nota Markdown e cópia para Archive
 ├── pipeline.py           # Orquestração do fluxo STT -> LLM -> Writer
 ├── watcher.py            # Monitor residente de pastas e ciclo de retenção
+├── lock.py               # Lock de instância única
+├── status.py             # Status do pipeline em tempo real (state/status.json)
 └── prompts/              # Prompts por rota (Diario, Planejamento, Inbox)
 
 setup.py                  # Instalador e configurador TUI interativo
@@ -114,6 +121,7 @@ whisper_compute_type: "int8"
 whisper_cpu_threads: 6
 whisper_language: "pt"
 ollama_host: "http://localhost:11434"
-llm_model: "gemma4:26b"
+ollama_keep_alive: "10m"   # mantém o modelo carregado entre notas
+llm_model: "gemma4:e4b"    # opcional: gemma4:26b
 archive_retention_days: 60
 ```
