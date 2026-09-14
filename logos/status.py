@@ -78,6 +78,7 @@ class StatusData:
     error: Optional[str] = None
     pid: int = 0
     heartbeat: str = ""
+    bot: Optional[Dict[str, Any]] = None  # estado do bot Telegram: off | polling | error
 
 
 class StatusTracker:
@@ -204,6 +205,14 @@ class StatusTracker:
         self._current.message = f"Falha na etapa '{STAGE_NAMES.get(stage, stage)}'"
         self._current.details = error
         self._current.error = error
+        self._save()
+
+    def set_bot(self, state: str, **info):
+        bot = dict(self._current.bot or {})
+        bot.update(info)
+        bot["state"] = state
+        bot["updated_at"] = datetime.now().isoformat()
+        self._current.bot = bot
         self._save()
 
     def heartbeat(self):

@@ -97,3 +97,54 @@ Use `Set-Content -Encoding utf8` ou o PowerShell 7: o `>` do Windows PowerShell 
 ### Pendente
 
 - Relançar o watcher (comandos da Etapa 1) e rodar o teste acima.
+
+## Etapa 3 · Bot Telegram, texto e voz (2026-09-14)
+
+### Decisões
+
+- **`requests` puro, não `python-telegram-bot`.** A PTB 22 é só asyncio: dentro de uma thread do watcher exigiria um event loop próprio, e o `send` montaria uma `Application` inteira para uma mensagem. Long polling é um laço de `getUpdates`; o que a Etapa 4 precisa (`getFile`, `reply_to_message`, `media_group_id`) são campos simples da API. Zero dependência nova.
+- **Thread no processo do watcher, não segundo processo.** Um lock, um log, um relançamento. O `StatusTracker` regrava o `status.json` inteiro a cada escrita, então dois processos seriam "último a escrever vence". O GIL não pesa: Whisper (ctranslate2) e a chamada HTTP ao Ollama liberam o GIL. Thread daemon iniciada depois do `observer.start()`; exceções do bot são capturadas por iteração e nunca derrubam o watcher.
+- **Nome do arquivo `YYYY-MM-DD HH-MM-SS tg <message_id>.<ext>`**, hora da mensagem no Telegram (local). O sufixo `tg` dá `canal: telegram` (Etapa 2); o `message_id` evita colisão no mesmo segundo e torna idempotente a reentrega de updates (queda entre gravar o arquivo e confirmar o offset): se o arquivo existe, não grava de novo. Gravação por `.<nome>.tmp` + `os.replace`, exatamente o caminho medido em 1,1 s.
+
+### O que mudou
+
+| Item | Mudança |
+|---|---|
+| `logos/telegram.py` | Long polling (`getUpdates`, timeout 30 s, `allowed_updates=["message"]`), backoff 1→60 s, 401 desliga o bot, 409 (outro poller com o mesmo token) logado com clareza. Erros de rede têm o token removido da mensagem. |
+| Dono | Primeiro `/start` grava `telegram_chat_id` em `state/secrets.yaml` (escrita atômica, preserva as outras chaves). Qualquer outro chat é ignorado; o log registra só o `chat_id`, nunca o conteúdo. Antes do `/start`, nada é capturado. |
+| Mensagens | Texto → `.txt`; voz → `.oga` (áudio enviado como arquivo mantém a extensão). `/tarefa`, `/ideia`, `/planejamento`, `/diario` prefixam a palavra (`/tarefa@Bot` também). Comando sem texto responde o uso; `/nova` responde que a janela chega na Etapa 4; desconhecido lista os comandos. Foto e documento respondem que chegam na Etapa 4. Acima de 20 MB, recusa com resposta. |
+| Confirmação | Resposta curta citando a mensagem: `📥 <nome do arquivo>`. Se começar com "diário" (ou `/diario`), acrescenta o lembrete de que passa pela nuvem. |
+| CLI | `python -m logos.telegram send --text … [--file …]` e `check`. Imagem ≤ 10 MB vai como foto com legenda (≤ 1024 caracteres; senão texto antes); o resto como documento. Texto dividido em partes de 4096, sem `parse_mode` (MarkdownV2 comeria `#tags` e `[[links]]`). **Saída: 0 ok, 1 falha, 2 não configurado.** Não importa `logos.status` nem toca no lock (teste em subprocesso garante). |
+| Status | `status.json` ganha `bot: {state: off|polling|error, username, owner_registered, last_poll, last_error, updated_at}`. Sem token, `off` e o watcher segue normal. |
+| `.stignore` | Acrescentado `* tg*`. Sem isso, cada arquivo do bot seria "alteração local" na pasta receive-only e **"Revert local changes" os apagaria**. Syncthing aceitou o padrão, pasta `idle`, 0 erros. Também cobre os pacotes `… tg/` da Etapa 4. |
+| README | Seção do bot e do CLI nos dois idiomas. |
+
+### Bugs pegos no caminho
+
+- `call(..., timeout=…)` usava `timeout` como timeout HTTP, mas `getUpdates` tem um parâmetro `timeout` próprio: `TypeError` a cada volta e o laço de erro girando para sempre. Renomeado para `http_timeout`, com teste de regressão contra a função real.
+
+### Verificação
+
+- `pytest`: 80 passed.
+- `main.py` real, pastas temporárias, sem token: `status.json` com `bot.state = off`, log "sem token… bot desligado", e `2026-09-14 15-02-11 tg 7.txt` virou nota em 1,1 s com `canal: telegram`, `categoria: tarefa`, `prioridade: alta`.
+- `python -m logos.telegram check` e `send` no repo real, sem `secrets.yaml`: exit 2 com a mensagem de onde gravar o token.
+- **Não testado com o Telegram de verdade**: o `secrets.yaml` ainda não existe.
+
+### Teste de aceite (você, pelo celular)
+
+1. Gravar `C:\Users\andre\Logos\state\secrets.yaml`:
+   ```yaml
+   telegram_token: "123456789:AAH..."
+   ```
+2. Relançar o watcher (bloco da Etapa 1).
+3. `.venv\Scripts\python -m logos.telegram check` → mostra `@<bot>` e "Dono: ainda não registrado".
+4. No celular, abrir o bot e mandar `/start` → resposta "Logos conectado a este chat". Rodar `check` de novo → exit 0.
+5. Mandar `tarefa urgente testar o bot` → resposta `📥 … tg <id>.txt`; em poucos segundos a nota em `C:\Workspace\notes\capturas\Inbox\` com `canal: telegram`, `categoria: tarefa`, `prioridade: alta`.
+6. Mandar uma mensagem de voz curta → `.oga` na Inbox e nota depois da transcrição.
+7. `Get-Content $HOME\Logos\state\status.json` → `bot.state = polling`.
+
+Observações: se um áudio estiver sendo processado, o texto espera na fila (o observer é serial). Não rode outro script fazendo `getUpdates` com o mesmo token enquanto o watcher estiver no ar (conflito 409).
+
+### Pendente
+
+- Token, `/start` e o teste de aceite acima.

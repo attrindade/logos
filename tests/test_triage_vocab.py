@@ -32,6 +32,8 @@ def test_diario_e_planejamento_nao_ganham_categoria():
 def test_canal_pelo_sufixo_tg():
     assert canal_from_filename("2026-09-14 15-02-11 tg.txt") == "telegram"
     assert canal_from_filename("2026-09-14 15-02-11 tg.oga") == "telegram"
+    assert canal_from_filename("2026-09-14 15-02-11 tg 4521.txt") == "telegram"
+    assert canal_from_filename("2026-09-14 15-02-11 tgx.txt") == "syncthing"
     assert canal_from_filename("2026-09-14 15-02-11.m4a") == "syncthing"
     assert canal_from_filename("2026-08-23 22-46-52 D.m4a") == "syncthing"
     assert canal_from_filename("nota solta.txt") == "syncthing"

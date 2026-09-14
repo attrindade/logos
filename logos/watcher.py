@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from . import config
 from .ledger import Entry, Ledger, State
 from .pipeline import process_file, retry_failed
 from .status import PipelineStage, tracker
+from .telegram import start_bot_thread
 from .triage import is_ignored, is_text_file
 
 logger = logging.getLogger(__name__)
@@ -173,6 +175,10 @@ def run():
     observer.start()
     logger.info(f"Observando {config.INBOX_DIR} ...")
 
+    # O bot só grava arquivos na Inbox; o observer acima os processa como qualquer chegada.
+    stop_bot = threading.Event()
+    start_bot_thread(stop_bot)
+
     last_daily_check = datetime.now()
     try:
         while True:
@@ -183,6 +189,7 @@ def run():
                 last_daily_check = datetime.now()
     except KeyboardInterrupt:
         logger.info("Encerrando watcher...")
+        stop_bot.set()
         tracker.set_idle("Watcher parado.")
         observer.stop()
     observer.join()

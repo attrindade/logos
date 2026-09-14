@@ -82,6 +82,37 @@ Maintenance: `python main.py --limpar-fantasmas` removes ledger failures left by
 
 ---
 
+## 💬 Telegram Bot (text and voice from anywhere)
+
+The watcher also runs a Telegram bot in a background thread (long polling, no open port). It only writes files into `Inbox/`; the regular pipeline turns them into notes.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and store the token **outside the repo** in `<data_root>/state/secrets.yaml`:
+   ```yaml
+   telegram_token: "123456789:AAH..."
+   ```
+   or set the `LOGOS_TELEGRAM_TOKEN` environment variable. Never put it in `logos_config.yaml`.
+2. Restart the watcher and send `/start` to the bot. The first chat that does so becomes the owner (`telegram_chat_id` is saved in `secrets.yaml`); messages from any other chat are ignored and logged.
+3. Text becomes `Inbox/YYYY-MM-DD HH-MM-SS tg <message_id>.txt`, voice becomes `… tg <message_id>.oga`. The ` tg` suffix sets `canal: telegram`. Each message gets a reply with the file name.
+4. Commands `/tarefa`, `/ideia`, `/planejamento`, `/diario` prefix the matching first word. `/nova` is reserved for session windows. Files above the Bot API's 20 MB download limit are refused with a reply.
+
+Diário captures sent through Telegram go through Telegram's cloud; the bot reminds you when a message starts with "diário".
+
+Add `* tg*` to `Inbox/.stignore` when the Inbox is a Syncthing receive-only folder: otherwise bot files show up as local changes, and "Revert local changes" deletes them.
+
+### Sending from scripts
+
+```bash
+python -m logos.telegram send --text "Morning briefing ready"
+python -m logos.telegram send --text "Activity" --file atividade/2026-09-14.png
+python -m logos.telegram check
+```
+
+Run from the repo root with the `.venv` Python. Images go as photos (caption = `--text` when ≤ 1024 chars), other files as documents; long text is split at 4096 characters and sent without formatting. Exit codes: `0` sent, `1` send failed, `2` bot not configured (no token or no owner yet). `send` does not touch the watcher's `status.json` or lock.
+
+The bot state (`off`, `polling`, `error`, username, last poll, last error) is published under `bot` in `state/status.json`.
+
+---
+
 ## 📱 Mobile Sync Workflow (Syncthing)
 
 For a fully automated mobile-to-desktop capture flow:

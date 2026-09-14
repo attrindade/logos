@@ -77,6 +77,37 @@ O Logos iniciará o processo residente (*watcher*):
 
 ---
 
+## 💬 Bot Telegram (texto e voz de qualquer lugar)
+
+O watcher também roda um bot Telegram numa thread (long polling, sem porta aberta). O bot só grava arquivos na `Inbox/`; o pipeline normal os transforma em notas.
+
+1. Crie o bot no [@BotFather](https://t.me/BotFather) e guarde o token **fora do repo**, em `<data_root>/state/secrets.yaml`:
+   ```yaml
+   telegram_token: "123456789:AAH..."
+   ```
+   ou na variável de ambiente `LOGOS_TELEGRAM_TOKEN`. Nunca no `logos_config.yaml`.
+2. Relance o watcher e mande `/start` ao bot. O primeiro chat que fizer isso vira o dono (`telegram_chat_id` gravado no `secrets.yaml`); mensagens de qualquer outro chat são ignoradas e logadas.
+3. Texto vira `Inbox/AAAA-MM-DD HH-MM-SS tg <message_id>.txt`; voz vira `… tg <message_id>.oga`. O sufixo ` tg` define `canal: telegram`. Cada mensagem recebe uma resposta com o nome do arquivo.
+4. Os comandos `/tarefa`, `/ideia`, `/planejamento` e `/diario` prefixam a primeira palavra correspondente. `/nova` fica reservado para a janela de sessão. Arquivos acima do limite de 20 MB de download da Bot API são recusados com resposta.
+
+Capturas de Diário mandadas pelo Telegram passam pela nuvem do Telegram; o bot lembra disso quando a mensagem começa com "diário".
+
+Quando a Inbox é uma pasta receive-only do Syncthing, acrescente `* tg*` ao `Inbox/.stignore`: sem isso, os arquivos do bot aparecem como alterações locais, e "Revert local changes" os apaga.
+
+### Envio a partir de scripts
+
+```bash
+python -m logos.telegram send --text "Briefing da manhã pronto"
+python -m logos.telegram send --text "Atividade" --file atividade/2026-09-14.png
+python -m logos.telegram check
+```
+
+Rode da raiz do repo com o Python do `.venv`. Imagens vão como foto (legenda = `--text` quando tiver até 1024 caracteres); os demais arquivos, como documento. Texto longo é dividido em partes de 4096 caracteres e enviado sem formatação. Códigos de saída: `0` enviado, `1` falha no envio, `2` bot não configurado (sem token ou ainda sem dono). O `send` não toca no `status.json` nem no lock do watcher.
+
+O estado do bot (`off`, `polling`, `error`, usuário, último poll, último erro) sai em `bot` no `state/status.json`.
+
+---
+
 ## 📱 Integração com o Celular (Syncthing)
 
 Para um fluxo 100% automático:

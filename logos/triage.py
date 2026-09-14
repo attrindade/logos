@@ -28,7 +28,7 @@ _CATEGORIAS = {
     "reuniao": "reuniao", "reunioes": "reuniao",
 }
 
-# Sufixo no nome dos arquivos gravados pelo bot: "2026-09-14 15-02-11 tg.txt".
+# Sufixo no nome dos arquivos gravados pelo bot: "2026-09-14 15-02-11 tg 123.txt" (123 = message_id).
 TELEGRAM_TAG = "tg"
 
 
@@ -87,8 +87,8 @@ def triage_from_filename(filename: str, fallback: datetime | None = None) -> dat
 
 def canal_from_filename(filename) -> str:
     m = _name_match(filename)
-    tag = (m.group("tag") or "").strip().lower() if m else ""
-    return "telegram" if tag == TELEGRAM_TAG else "syncthing"
+    words = (m.group("tag") or "").lower().split() if m else []
+    return "telegram" if words and words[0] == TELEGRAM_TAG else "syncthing"
 
 
 def _normalize_word(word: str) -> str:
