@@ -200,6 +200,18 @@ Observações: se um áudio estiver sendo processado, o texto espera na fila (o 
 5. **No Obsidian**, abrir a nota e conferir: a foto aparece, o PDF mostra a página 1, e "Texto extraído" abre o sidecar. Se o embed do PDF mostrar o texto do sidecar em vez da página, me avise: troco o nome do sidecar.
 6. Responder (arrastar para responder) a uma mensagem de ontem com uma foto → a foto aparece no fim da nota de ontem.
 
+### Bugs pegos na revisão final (commit `fix:` separado)
+
+- **Resposta a uma sessão com janela vencida perdia o `reply_to`.** A janela só era checada depois de cada lote do `getUpdates` e depois do teste de "a resposta pertence à sessão aberta?". Uma resposta chegando entre 10:00 e 10:30 de silêncio entrava na sessão vencida, que fechava em seguida, e virava nota nova em vez de complementar a original. Agora `_capture` fecha a sessão vencida antes de decidir.
+- **Sessão vazia virava nota vazia.** Se o download da primeira mensagem falhava, a sessão ficava aberta sem mensagens e, no `/nova` ou na janela, era entregue e virava "Anexo do Telegram" sem conteúdo. Agora é descartada (o `recover` já fazia isso).
+
+### Observações menores
+
+- Pacote com voz não grava `modelo_stt` no frontmatter (só `fonte_tipo: audio` grava). Cosmético.
+- `describe_image` gerou 469 tokens para um prompt de "até 3 frases"; limitar `num_predict` exigiria passar `options` por `_ollama_generate`. Fica para quando a visão for usada de fato.
+- `_ocrmypdf_text` chama `sys.executable -m ocrmypdf`, que no watcher real é o `pythonw.exe`. Testado só sob `python.exe`: o primeiro PDF escaneado de verdade é o teste.
+- `tests/test_ghosts.py::test_ledger_real_nao_gera_reprocessamento` não verifica mais nada, porque o ledger real já não tem `failed`. Inofensivo.
+
 ### Pendente
 
 - Token, relançamento e o teste acima.

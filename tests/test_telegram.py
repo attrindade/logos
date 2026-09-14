@@ -192,6 +192,29 @@ def test_resposta_a_mensagem_antiga_vira_pacote_fechado_com_reply_to(owner, api,
     assert "resposta" in _replies(api)[1]
 
 
+def test_resposta_a_sessao_com_janela_vencida_vai_para_a_nota_original(owner, api):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("ideia", message_id=7))
+    bot.session.last_at -= 11 * 60  # venceu, mas o tick do polling ainda não passou
+    bot.handle_update(_update("complemento", message_id=8, reply_to_message={"message_id": 7}))
+
+    assert bot.session is None
+    assert _inbox() == [BUNDLE, "2026-09-14 15-02-11 tg 8"]
+    assert _manifest("2026-09-14 15-02-11 tg 8")["reply_to"] == 7
+
+
+def test_sessao_vazia_por_falha_no_download_nao_vira_pacote(owner, api):
+    bot = Bot(TOKEN)
+    with patch.object(telegram, "download_file", side_effect=TelegramError("getFile: 400")):
+        bot.handle_update(_update(photo=[{"file_id": "p", "file_size": 5}]))
+    assert bot.session is not None and bot.session.size == 0
+
+    bot.handle_update(_update("/nova", message_id=8))
+
+    assert _inbox() == [] and _staged() == []
+    assert _replies(api)[-1] == "Sessão vazia descartada."
+
+
 def test_album_localizacao_e_links_vao_ao_manifest(owner, api, downloads):
     bot = Bot(TOKEN)
     texto = "leia https://exemplo.com/artigo e 😀 https://b.org"

@@ -352,7 +352,10 @@ class Bot:
                 return
             name, size = self.session.name, self.session.size
             self._close(self.session, "nova")
-            self.reply(message, f"✅ Sessão fechada com {size} mensagem(ns): {name}. A nota sai em seguida.")
+            if size == 0:
+                self.reply(message, "Sessão vazia descartada.")
+            else:
+                self.reply(message, f"✅ Sessão fechada com {size} mensagem(ns): {name}. A nota sai em seguida.")
         else:
             self.reply(message, _ajuda())
 
@@ -373,6 +376,9 @@ class Bot:
         return None, None, ""
 
     def _capture(self, message: dict, text: str | None = None) -> None:
+        # Antes de tudo: uma sessão vencida que o tick do polling ainda não fechou não pode
+        # absorver uma resposta a uma mensagem dela (a resposta tem de ir para a nota original).
+        self.expire_if_idle()
         text = text if text is not None else (message.get("text") or "").strip()
         kind, media, ext = self._classify(message, text)
         if kind is None:
@@ -397,7 +403,6 @@ class Bot:
             self.reply(message, f"📎 {label} registrado como resposta ({session.name}). Complementa a nota da mensagem original." + aviso)
             return
 
-        self.expire_if_idle()
         opened = self.session is None
         if opened:
             self.session = self._open(message)
@@ -471,6 +476,11 @@ class Bot:
     def _close(self, session: Session, reason: str) -> None:
         if session is self.session:
             self.session = None
+        if not session.manifest["mensagens"]:
+            # sessão aberta cuja primeira mensagem falhou: não há o que virar nota
+            logger.info(f"Telegram: sessão vazia descartada: {session.name}")
+            shutil.rmtree(session.directory, ignore_errors=True)
+            return
         finalize_bundle(session.directory, session.manifest, reason)
 
     def expire_if_idle(self, now: float | None = None) -> str | None:
