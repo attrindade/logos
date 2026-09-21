@@ -139,3 +139,59 @@ def test_modelo_llm_fica_vazio_quando_o_titulo_nao_passou_pela_llm():
         assert recording_enrichment(longo)["_llm_usado"] is False
     with patch("logos.llm._ollama_generate", return_value="Sessao de RPG no bar"):
         assert recording_enrichment(longo)["_llm_usado"] is True
+
+
+# --- devolutiva da nota pronta ---------------------------------------------------
+
+def test_nota_pronta_volta_no_chat(inbox, tmp_path):
+    audio = inbox / "2026-09-21 09-00-00.m4a"
+    audio.write_bytes(b"x" * 100)
+    ledger = Ledger(tmp_path / "ledger.json")
+    fala = "Preciso mandar a proposta para o Renato ate quinta. " * 20
+    enriquecido = {"titulo": "Proposta para o Renato", "tags": ["cliente"],
+                   "proxima_acao": "Enviar a proposta ate quinta", "acoes": ["Revisar valores"], "resumo": "."}
+
+    with patch("logos.pipeline.transcribe_file", return_value=Transcription(text=fala, duration_s=60.0)), \
+         patch("logos.pipeline.enrich", return_value=enriquecido), \
+         patch("logos.telegram.notify") as notify:
+        process_file(audio, ledger)
+
+    enviado = notify.call_args[0][0]
+    assert "Proposta para o Renato" in enviado
+    assert "Enviar a proposta ate quinta" in enviado
+    assert "Revisar valores" in enviado
+
+
+def test_diario_devolve_so_a_confirmacao_sem_conteudo(inbox, tmp_path):
+    # O diário é 100% local por decisão registrada; tudo que passa pelo bot passa pela nuvem
+    # do Telegram. Nem título, nem ação, nem uma linha da fala podem sair daqui.
+    audio = inbox / "2026-09-21 23-00-00.m4a"
+    audio.write_bytes(b"x" * 100)
+    ledger = Ledger(tmp_path / "ledger.json")
+    fala = "Diario. Hoje foi um dia dificil e eu briguei com uma pessoa muito proxima. " * 20
+    enriquecido = {"titulo": "Briga com pessoa proxima", "tags": [], "humor": "abalado",
+                   "proxima_acao": "Pedir desculpas", "acoes": ["Conversar amanha"], "resumo": "."}
+
+    with patch("logos.pipeline.transcribe_file", return_value=Transcription(text=fala, duration_s=60.0)), \
+         patch("logos.pipeline.enrich", return_value=enriquecido), \
+         patch("logos.telegram.notify") as notify:
+        process_file(audio, ledger)
+
+    enviado = notify.call_args[0][0]
+    assert enviado == "Logos: diário registrado."
+    for vazado in ("Briga", "proxima", "desculpas", "dificil", "abalado", "Conversar"):
+        assert vazado not in enviado
+
+
+def test_devolutiva_quebrada_nao_derruba_o_pipeline(inbox, tmp_path):
+    audio = inbox / "2026-09-21 10-00-00.m4a"
+    audio.write_bytes(b"x" * 100)
+    ledger = Ledger(tmp_path / "ledger.json")
+    fala = "Lembrar de conferir o CI do aluguel finder. " * 20
+
+    with patch("logos.pipeline.transcribe_file", return_value=Transcription(text=fala, duration_s=60.0)), \
+         patch("logos.pipeline.enrich", return_value={"titulo": "CI", "tags": [], "resumo": "."}), \
+         patch("logos.telegram.notify", side_effect=RuntimeError("bot fora")):
+        process_file(audio, ledger)
+
+    assert ledger.get(audio.name, audio.stat().st_size).state == "enriched"

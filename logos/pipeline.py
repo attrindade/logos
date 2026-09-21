@@ -62,6 +62,33 @@ def _notify_degraded(filename: str, reason: str) -> None:
         logger.warning(f"Não deu para avisar a degradação de {filename}: {e}")
 
 
+def _notify_note_ready(route: str, note_path: Path, enrichment: dict, tipo: str | None) -> None:
+    """Devolve a nota pronta no mesmo chat. Sem isto o dono fala, recebe um "registrado" e
+    nunca vê o resultado: a nota existe e fica no vault, invisível.
+
+    O Diário é a exceção deliberada. A decisão de exposição do diário o mantém 100% local, e
+    tudo que passa pelo bot passa pela nuvem do Telegram — então dele vai só a confirmação de
+    que existe, sem título, sem ação, sem uma linha do conteúdo."""
+    try:
+        from . import telegram
+        if route.lower().startswith("diario") or route.lower().startswith("diário"):
+            telegram.notify("Logos: diário registrado.")
+            return
+        partes = [f"Logos: {enrichment.get('titulo') or note_path.stem}"]
+        if tipo == "gravacao":
+            partes.append("(gravação longa — transcrita, sem enriquecimento)")
+        proxima = enrichment.get("proxima_acao")
+        if proxima:
+            partes.append(f"Próxima ação: {proxima}")
+        acoes = enrichment.get("acoes") or []
+        if isinstance(acoes, list) and acoes:
+            partes.append("Ações: " + "; ".join(str(a) for a in acoes[:3]))
+        partes.append(note_path.name)
+        telegram.notify(chr(10).join(partes))
+    except Exception as e:
+        logger.warning(f"Não deu para devolver a nota de {note_path.name}: {e}")
+
+
 def process_path(path: Path, ledger: Ledger) -> None:
     """Arquivo solto -> process_file; pasta de pacote do bot -> process_bundle; outras pastas, nada."""
     if path.is_dir():
@@ -222,6 +249,7 @@ def process_file(path: Path, ledger: Ledger) -> None:
         archive_path=str(archive_path),
     ))
     logger.info(f"Nota gerada: {note_path}")
+    _notify_note_ready(t.route.value, note_path, enrichment, tipo)
 
     elapsed = time.time() - start_time
     tracker.set_completed(
@@ -456,6 +484,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
             tipo=tipo, degradado=degradado,
         )
         logger.info(f"Nota gerada a partir do pacote {path.name}: {note_path}")
+        _notify_note_ready(route, note_path, enrichment, tipo)
 
     ledger.upsert(Entry(
         filename=path.name, size=size, state=State.ENRICHED,
