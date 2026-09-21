@@ -150,6 +150,8 @@ def write_note(
     fonte_tipo: str = "audio",
     anexos: list[dict] | None = None,
     local: dict | None = None,
+    tipo: str | None = None,
+    degradado: str = "",
 ) -> Path:
     anexos = anexos or []
     route_dir = config.NOTES_DIR / triage_result.route.value
@@ -164,7 +166,7 @@ def write_note(
     frontmatter = {
         "date": date_str,
         "time": time_str,
-        "tipo": triage_result.route.value.lower(),
+        "tipo": tipo or triage_result.route.value.lower(),
         "titulo": enrichment.get("titulo", ""),
         "tags": _as_list(enrichment.get("tags")),
     }
@@ -176,7 +178,9 @@ def write_note(
     prioridade = triage_result.prioridade or enrichment.get("prioridade")
     if prioridade:
         frontmatter["prioridade"] = prioridade
-    if enrichment.get("status"):
+    if degradado:
+        frontmatter["status"] = "degradado"
+    elif enrichment.get("status"):
         frontmatter["status"] = enrichment.get("status")
     categoria = triage_result.categoria or enrichment.get("categoria")
     if categoria:
@@ -204,6 +208,17 @@ def write_note(
     frontmatter["modelo_llm"] = llm_model  # vazio (omitido) quando a nota curta pula a LLM
 
     body_parts = [_yaml_frontmatter(frontmatter), ""]
+
+    # A nota precisa denunciar a própria degradação: em 2026-09-21 três capturas saíram sem
+    # enriquecimento (Ollama fora do ar) com aparência de nota normal, e ninguém percebeu.
+    if degradado:
+        body_parts += [
+            "> [!warning] Enriquecimento não aconteceu",
+            f"> {degradado}",
+            "> A transcrição abaixo está íntegra. Reprocessar com `retry_failed` depois de"
+            " resolver a causa, ou promover esta nota à mão.",
+            "",
+        ]
 
     # ---------------------------------------------------------
     # 2. Seções Estruturadas no Corpo da Nota

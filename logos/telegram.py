@@ -597,6 +597,21 @@ def _chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     return chunks or [""]
 
 
+def notify(text: str) -> bool:
+    """Aviso de uma linha para o dono. Nunca levanta: um alerta que derruba o pipeline é
+    pior que a falha que ele anuncia. Devolve False quando não deu para avisar."""
+    token, chat_id = get_token(), get_owner_chat_id()
+    if not token or chat_id is None:
+        logger.warning("Aviso não enviado: bot do Telegram sem token ou sem dono registrado.")
+        return False
+    try:
+        call(token, "sendMessage", chat_id=chat_id, text=text[:MESSAGE_LIMIT])
+        return True
+    except Exception as e:
+        logger.warning(f"Aviso não enviado pelo Telegram: {e}")
+        return False
+
+
 def send(text: str | None, file: Path | None) -> int:
     token, chat_id = get_token(), get_owner_chat_id()
     if not token or chat_id is None:

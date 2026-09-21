@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import aw, config, extractors
 from .ledger import Entry, Ledger, State
-from .llm import enrich, short_enrichment
+from .llm import enrich, is_long_recording, recording_enrichment, short_enrichment
 from .status import PipelineStage, tracker
 from .stt import transcribe_file
 from .triage import is_bundle_name, is_ignored, is_text_file, triage
@@ -42,6 +42,24 @@ def _mark_failed(path: Path, size: int, mtime: datetime, ledger: Ledger, stage: 
         route=t_initial.route.value, recorded_at=t_initial.recorded_at.isoformat(), error=str(error),
     ))
     tracker.set_failed(path.name, stage, str(error))
+
+
+def _degradation_reason(error: Exception) -> str:
+    """Frase curta para o dono, não o traceback. Recusa de conexão é o caso comum."""
+    text = str(error)
+    if "10061" in text or "Max retries exceeded" in text or "NewConnectionError" in text:
+        return f"O Ollama não respondeu em {config.OLLAMA_HOST} — o serviço provavelmente está parado."
+    return f"A etapa de enriquecimento falhou: {_one_line(text, 300)}"
+
+
+def _notify_degraded(filename: str, reason: str) -> None:
+    """Avisa o dono pelo canal que ele já usa. Import local: telegram importa o pipeline."""
+    try:
+        from . import telegram
+        aviso = f"Logos: {filename} virou nota sem enriquecimento."
+        telegram.notify(aviso + chr(10) + reason)
+    except Exception as e:
+        logger.warning(f"Não deu para avisar a degradação de {filename}: {e}")
 
 
 def process_path(path: Path, ledger: Ledger) -> None:
@@ -144,9 +162,25 @@ def process_file(path: Path, ledger: Ledger) -> None:
         ))
 
     # Etapa 4: Enriquecimento com IA (LLM) — notas curtas pulam a LLM
+    tipo = None
+    degradado = ""
     if len(transcript.split()) < config.LLM_MIN_WORDS:
         enrichment = short_enrichment(transcript)
         llm_model = ""
+    elif is_long_recording(transcript):
+        # Gravação (reunião, sessão de RPG, aula): só transcrita e nomeada. O contrato de
+        # nota de voz não descreve esse material; a leitura fica para a promoção em sessão.
+        tracker.set_stage(
+            PipelineStage.ENRICHING,
+            filename=path.name,
+            file_size=size,
+            route=t.route.value,
+            message="Gravação longa: transcrita e nomeada, sem enriquecimento.",
+            details="Acima do limiar de contexto — rota de gravação.",
+        )
+        tipo = "gravacao"
+        llm_model = config.LLM_MODEL
+        enrichment = recording_enrichment(transcript)
     else:
         tracker.set_stage(
             PipelineStage.ENRICHING,
@@ -161,7 +195,9 @@ def process_file(path: Path, ledger: Ledger) -> None:
             enrichment = enrich(transcript, t.route)
         except Exception as e:
             logger.warning(f"Falha na etapa LLM de {path.name}: {e}. Nota será gerada só com o transcrito.")
-            enrichment = {"titulo": path.stem, "tags": [], "resumo": ""}
+            degradado = _degradation_reason(e)
+            enrichment = short_enrichment(transcript)
+            _notify_degraded(path.name, degradado)
 
     # Etapa 5: Geração de Nota & Arquivamento
     tracker.set_stage(
@@ -173,7 +209,10 @@ def process_file(path: Path, ledger: Ledger) -> None:
         details=f"Destino: Notes/{t.route.value}",
     )
 
-    note_path = write_note(path.name, t, transcript, enrichment, llm_model, fonte_tipo=fonte_tipo)
+    note_path = write_note(
+        path.name, t, transcript, enrichment, llm_model,
+        fonte_tipo=fonte_tipo, tipo=tipo, degradado=degradado,
+    )
     archive_path = archive_audio(path, t)
 
     ledger.upsert(Entry(
@@ -383,11 +422,21 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     else:
         route = t.route.value
         base = triage_text or next((a.text for a in anexos if a.text.strip()), "")
+        tipo = None
+        degradado = ""
         if len(transcript.split()) < config.LLM_MIN_WORDS:
             enrichment = short_enrichment(base) if base.strip() else {
                 "titulo": _fallback_title(anexos, local), "tags": [], "resumo": "",
             }
             llm_model = ""
+        elif is_long_recording(transcript):
+            tracker.set_stage(
+                PipelineStage.ENRICHING, filename=path.name, file_size=size, route=route,
+                message="Gravação longa no pacote: transcrita e nomeada, sem enriquecimento.",
+            )
+            tipo = "gravacao"
+            llm_model = config.LLM_MODEL
+            enrichment = recording_enrichment(transcript)
         else:
             tracker.set_stage(
                 PipelineStage.ENRICHING, filename=path.name, file_size=size, route=route,
@@ -398,10 +447,13 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 enrichment = enrich(transcript, t.route)
             except Exception as e:
                 logger.warning(f"Falha na etapa LLM do pacote {path.name}: {e}. Nota sem enriquecimento.")
+                degradado = _degradation_reason(e)
                 enrichment = short_enrichment(base) if base.strip() else {"titulo": path.name, "tags": [], "resumo": ""}
+                _notify_degraded(path.name, degradado)
         note_path = write_note(
             path.name, t, transcript, enrichment, llm_model,
             fonte_tipo="pacote", anexos=stored, local=local,
+            tipo=tipo, degradado=degradado,
         )
         logger.info(f"Nota gerada a partir do pacote {path.name}: {note_path}")
 

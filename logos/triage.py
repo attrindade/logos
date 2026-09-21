@@ -46,10 +46,18 @@ def is_text_file(filename) -> bool:
     return Path(str(filename)).suffix.lower() in TEXT_EXTENSIONS
 
 
+# Temporários que o Syncthing cria enquanto ainda escreve o arquivo final. Passavam pelo
+# filtro do "." e viravam uma segunda nota do mesmo áudio (a chave do ledger é nome::tamanho,
+# então o .tmp nunca colide com o original). Visto em 2026-09-21: ~syncthing~2026-09-18
+# 20-39-56.m4a.tmp gerou duplicata da captura de 18/09.
+_SYNC_TEMP_RE = re.compile(r"^(~syncthing~|\.syncthing\.)|\.(tmp|part|partial|crdownload)$", re.IGNORECASE)
+
+
 def is_ignored(filename: str) -> bool:
     """Arquivos que começam com '.' são metadados do Syncthing/app e nunca viram nota.
-    Inclui .evr_recently_deleted_*: é a lixeira do Easy Voice Recorder, áudio que o dono apagou."""
-    return filename.startswith(".")
+    Inclui .evr_recently_deleted_*: é a lixeira do Easy Voice Recorder, áudio que o dono apagou.
+    Inclui também os temporários de sincronização (~syncthing~*, *.tmp)."""
+    return filename.startswith(".") or bool(_SYNC_TEMP_RE.search(filename))
 
 
 def _strip_extension(filename: str) -> str:

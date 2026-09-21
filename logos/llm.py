@@ -2,6 +2,7 @@
 ."""
 import logging
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -22,6 +23,19 @@ _PROMPT_FILES = {
 # aproximação grosseira: português tende a ~1.3 chars/token em contagem de whitespace;
 # usamos contagem de palavras * 1.4 como proxy conservador de tokens (evita truncamento).
 _TOKENS_PER_WORD = 1.4
+
+# Retentativa de conexão com o Ollama (ver _ollama_generate).
+_CONNECT_ATTEMPTS = 3
+_CONNECT_BACKOFF_S = 20
+
+# Título de gravação longa: só o começo da fala basta, e cabe folgado no num_ctx.
+_TITLE_SAMPLE_WORDS = 1200
+_TITLE_MAX_CHARS = 90
+_TITLE_PROMPT = """Leia o começo desta transcrição e responda APENAS com um título curto em português
+(no máximo 10 palavras) que descreva do que se trata. Sem aspas, sem explicação, sem prefixo.
+Se não der para saber, responda: Gravação sem assunto identificado.
+
+{transcript}"""
 
 
 def _estimate_tokens(text: str) -> int:
@@ -66,9 +80,32 @@ def _ollama_generate(prompt: str, model: str = None, keep_alive: str = None, ima
     }
     if images:
         payload["images"] = images  # base64, para modelos com visão
-    resp = requests.post(f"{config.OLLAMA_HOST}/api/generate", json=payload, timeout=600)
-    resp.raise_for_status()
-    return resp.json()["response"].strip()
+    # Em 2026-09-21 o Ollama estava fora do ar e três capturas viraram nota crua sem que
+    # ninguém percebesse. Uma recusa de conexão costuma ser o serviço subindo, não ausência
+    # de serviço: tenta de novo antes de desistir e deixar a nota degradada.
+    last_error = None
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            resp = requests.post(f"{config.OLLAMA_HOST}/api/generate", json=payload, timeout=600)
+            resp.raise_for_status()
+            return resp.json()["response"].strip()
+        except requests.exceptions.ConnectionError as e:
+            last_error = e
+            if attempt < _CONNECT_ATTEMPTS - 1:
+                logger.warning(
+                    f"Ollama não respondeu em {config.OLLAMA_HOST} "
+                    f"(tentativa {attempt + 1}/{_CONNECT_ATTEMPTS}); nova tentativa em {_CONNECT_BACKOFF_S}s."
+                )
+                time.sleep(_CONNECT_BACKOFF_S)
+    raise last_error
+
+
+def ollama_online() -> bool:
+    """Checagem barata antes de prometer enriquecimento no status."""
+    try:
+        return requests.get(f"{config.OLLAMA_HOST}/api/tags", timeout=5).ok
+    except requests.RequestException:
+        return False
 
 
 def _strip_yaml_fences(raw: str) -> str:
@@ -90,6 +127,30 @@ def short_enrichment(text: str) -> dict:
         return {"titulo": "Sem conteúdo", "tags": [], "resumo": ""}
     titulo = " ".join(words[:8]).rstrip(".,;:!?…-— ")
     return {"titulo": titulo, "tags": [], "resumo": text.strip()}
+
+
+def is_long_recording(transcript: str) -> bool:
+    """Acima do limiar de chunk o transcrito deixa de ser nota de voz: é gravação (reunião,
+    sessão de RPG, aula). O contrato de nota de voz — Próxima Ação, Gratidão, Tensões — não
+    descreve esse material, e a consolidação dos blocos parciais reinjetava dezenas de
+    milhares de tokens num contexto de 8k, devolvendo YAML inválido (visto em 2026-09-21).
+    Gravação vai para a rota própria: transcrita, nomeada e arquivada."""
+    return _estimate_tokens(transcript) > config.CHUNK_TOKEN_THRESHOLD
+
+
+def recording_enrichment(transcript: str, model: str = None) -> dict:
+    """Gravação longa: só um título. Nenhuma seção, nenhuma extração de entidade — isso fica
+    para a promoção em sessão, quando o dono decidir o que a gravação é."""
+    head = " ".join(transcript.split()[:_TITLE_SAMPLE_WORDS])
+    try:
+        raw = _ollama_generate(_TITLE_PROMPT.format(transcript=head), model=model)
+        titulo = _strip_yaml_fences(raw).strip().strip('"\'').splitlines()[0].strip()
+    except Exception as e:
+        logger.warning(f"Falha ao titular a gravação: {e}. Título vem das primeiras palavras.")
+        titulo = ""
+    if not titulo:
+        titulo = short_enrichment(transcript).get("titulo", "Gravação")
+    return {"titulo": titulo[:_TITLE_MAX_CHARS].strip(), "tags": [], "resumo": ""}
 
 
 def enrich(transcript: str, route: Route, model: str = None) -> dict:
