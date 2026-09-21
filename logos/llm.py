@@ -148,9 +148,12 @@ def recording_enrichment(transcript: str, model: str = None) -> dict:
     except Exception as e:
         logger.warning(f"Falha ao titular a gravação: {e}. Título vem das primeiras palavras.")
         titulo = ""
+    llm_usado = bool(titulo)
     if not titulo:
         titulo = short_enrichment(transcript).get("titulo", "Gravação")
-    return {"titulo": titulo[:_TITLE_MAX_CHARS].strip(), "tags": [], "resumo": ""}
+    # _llm_usado diz ao pipeline se pode gravar modelo_llm: o writer documenta esse campo como
+    # vazio quando a nota não passou pela LLM, e o título que cai nas primeiras palavras não passou.
+    return {"titulo": titulo[:_TITLE_MAX_CHARS].strip(), "tags": [], "resumo": "", "_llm_usado": llm_usado}
 
 
 def enrich(transcript: str, route: Route, model: str = None) -> dict:

@@ -179,8 +179,8 @@ def process_file(path: Path, ledger: Ledger) -> None:
             details="Acima do limiar de contexto — rota de gravação.",
         )
         tipo = "gravacao"
-        llm_model = config.LLM_MODEL
         enrichment = recording_enrichment(transcript)
+        llm_model = config.LLM_MODEL if enrichment.pop("_llm_usado", False) else ""
     else:
         tracker.set_stage(
             PipelineStage.ENRICHING,
@@ -435,8 +435,8 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 message="Gravação longa no pacote: transcrita e nomeada, sem enriquecimento.",
             )
             tipo = "gravacao"
-            llm_model = config.LLM_MODEL
             enrichment = recording_enrichment(transcript)
+            llm_model = config.LLM_MODEL if enrichment.pop("_llm_usado", False) else ""
         else:
             tracker.set_stage(
                 PipelineStage.ENRICHING, filename=path.name, file_size=size, route=route,

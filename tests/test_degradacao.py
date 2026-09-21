@@ -131,3 +131,11 @@ def test_aviso_do_telegram_nunca_derruba_o_pipeline():
          patch("logos.telegram.get_owner_chat_id", return_value=1), \
          patch("logos.telegram.call", side_effect=RuntimeError("bot fora do ar")):
         assert telegram.notify("teste") is False
+
+
+def test_modelo_llm_fica_vazio_quando_o_titulo_nao_passou_pela_llm():
+    longo = "Na ultima aventura eu estava no bar com voces. " * 3000
+    with patch("logos.llm._ollama_generate", side_effect=CONN_ERROR):
+        assert recording_enrichment(longo)["_llm_usado"] is False
+    with patch("logos.llm._ollama_generate", return_value="Sessao de RPG no bar"):
+        assert recording_enrichment(longo)["_llm_usado"] is True
