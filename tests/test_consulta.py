@@ -442,3 +442,21 @@ def test_wikilink_com_ancora_perde_a_cerquilha(vault):
     assert consulta.limpar("ver [[PPJ#Equipe]]") == "ver Equipe"
     assert consulta.limpar("ver [[PPJ#Equipe|a equipe]]") == "ver a equipe"
     assert consulta.limpar("ver [[PPJ]]") == "ver PPJ"
+
+
+def test_s0_do_briefing_volta_com_a_marca_do_briefing(vault, ctx):
+    """Marcador é semântica: /h → /s1 → /s0 não pode devolver o briefing como nota comum."""
+    (vault / "briefings/2026-09-21.md").write_text(
+        "# Briefing 21\n\n" + "".join(
+            f"## Bloco {n}\n\n{'texto ' * 200}\n\n" for n in range(1, 5)
+        ),
+        encoding="utf-8",
+    )
+    assert consulta.cmd_hoje(ctx).startswith(consulta.MARCA_BRIEFING)
+    consulta.cmd_indice("s", 1, ctx)
+    assert consulta.cmd_indice("s", 0, ctx).startswith(consulta.MARCA_BRIEFING)
+
+
+def test_s0_de_projeto_segue_com_a_marca_de_nota(vault, ctx):
+    consulta.cmd_ver("ppj", ctx)
+    assert consulta.cmd_indice("s", 0, ctx).startswith(consulta.MARCA_NOTA)

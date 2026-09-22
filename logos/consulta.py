@@ -485,6 +485,9 @@ class Contexto:
         self.resultados: list[Path] = []
         self.nota: Path | None = None
         self.secoes: list[str] = []
+        # A marca vem junto porque o /s0 reabre a nota: sem ela, o índice do briefing
+        # voltaria com a marca de nota e o marcador deixaria de significar o que significa.
+        self.marca: str = MARCA_NOTA
 
     def lembrar_projetos(self, notas: list[Path]) -> None:
         self.projetos = list(notas)
@@ -492,9 +495,10 @@ class Contexto:
     def lembrar_resultados(self, notas: list[Path]) -> None:
         self.resultados = list(notas)
 
-    def lembrar_nota(self, nota: "Nota") -> None:
+    def lembrar_nota(self, nota: "Nota", marca: str = MARCA_NOTA) -> None:
         self.nota = nota.path
         self.secoes = [titulo for titulo, _ in nota.secoes]
+        self.marca = marca
 
     def escolher(self, letra: str, numero: int) -> Path:
         lista = {"p": self.projetos, "r": self.resultados}[letra]
@@ -650,7 +654,7 @@ def render_ajuda() -> str:
 
 def _abrir(path: Path, ctx: Contexto, marca: str = MARCA_NOTA) -> str:
     nota = carregar(path)
-    ctx.lembrar_nota(nota)
+    ctx.lembrar_nota(nota, marca)
     return render_nota(nota, marca)
 
 
@@ -706,8 +710,9 @@ def cmd_indice(letra: str, numero: int, ctx: Contexto) -> str:
         if ctx.nota is None:
             raise ConsultaError("Nenhuma nota aberta. Mande /ver e escolha uma.")
         nota = carregar(ctx.nota)
-        ctx.lembrar_nota(nota)
-        return render_nota(nota) if numero == 0 else render_secao(nota, numero)
+        marca = ctx.marca
+        ctx.lembrar_nota(nota, marca)
+        return render_nota(nota, marca) if numero == 0 else render_secao(nota, numero)
     return _abrir(ctx.escolher(letra, numero), ctx)
 
 
