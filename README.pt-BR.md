@@ -101,15 +101,25 @@ Quando a Inbox é uma pasta receive-only do Syncthing, acrescente `* tg*` ao `In
 
 O mesmo bot lê o vault, sem LLM e sem escrever nada:
 
-| Comando | O que faz |
-| :--- | :--- |
-| `/ver` | lista os projetos ativos, do mexido mais recentemente para o mais antigo |
-| `/ver <nome>` | abre a nota; se for longa, devolve o índice de seções |
-| `/ver <nome> <n>` | abre a seção `n` daquela nota |
-| `/buscar <termo>` | linhas que casam, agrupadas por arquivo (sem acento e sem caixa) |
-| `/hoje` | o briefing mais recente de `briefings/` |
+| Comando | Atalho | O que faz |
+| :--- | :--- | :--- |
+| `/inicio` | `/0` | para onde ir: projetos, briefing e busca, já numerados |
+| `/ver` | `/v` | lista os projetos ativos, do mexido mais recentemente para o mais antigo |
+| `/ver <nome>` | | abre a nota; se for longa, devolve o índice de seções |
+| `/buscar <termo>` | `/b` | linhas que casam, agrupadas por arquivo (sem acento e sem caixa) |
+| `/hoje` | `/h` | o briefing mais recente de `briefings/` |
+| `/ajuda` | `/a` | o sistema inteiro numa tela |
 
-A saída vai em HTML da Bot API, com o Markdown do vault reduzido a texto legível: wikilink vira o alias, pictograma sai, separador de tabela some, frontmatter fica fora da busca. `send()` e `notify()` seguem em texto puro — ligar HTML neles quebraria o briefing, que manda `<` e `&` sem escapar.
+**Os números das respostas são comandos.** É o que dá a curva de aprendizado curta: nada para
+memorizar, porque o próximo passo já está na tela. `/p1` abre o primeiro projeto da última
+lista, `/s3` a terceira seção da nota aberta (`/s0` volta ao índice) e `/r2` o segundo resultado
+da última busca. Um fluxo inteiro é `/0` → `/p1` → `/s3`, sem digitar nome nenhum.
+
+Esses índices vivem num `consulta.Contexto` por processo, em memória. Não persistem de
+propósito: um índice que sobrevive a um relançamento apontaria para outra nota sem avisar, então
+depois de uma queda `/p3` responde que a lista venceu em vez de abrir a coisa errada.
+
+A saída vai em HTML da Bot API, com o Markdown do vault reduzido a texto legível: wikilink vira o alias, pictograma sai, separador de tabela some, frontmatter fica fora da busca. O corpo das notas vai em `<blockquote>`, e em `<blockquote expandable>` quando passa de `LIMITE_CITACAO` — a nota chega inteira ocupando quatro linhas na tela. Por isso o `partir` fecha e reabre a citação na fronteira entre mensagens: cortar por caractere partiria uma tag. Cada tipo de resposta abre com um marcador fixo (`MARCA_PROJETO`, `MARCA_SECAO`, `MARCA_BUSCA`, `MARCA_BRIEFING`, `MARCA_INICIO`) e fecha com uma dica do próximo comando; o emoji é semântica, não enfeite, e o que vem do vault continua sendo limpo de pictograma. `send()` e `notify()` seguem em texto puro — ligar HTML neles quebraria o briefing, que manda `<` e `&` sem escapar.
 
 **As pastas legíveis são uma allowlist** em `consulta.ALLOWED_SUBDIRS` (`work/active`, `brain`, `org`, `briefings`, `capturas/Inbox`, `capturas/Planejamento`), relativa a `vault_dir`. `capturas/Diario/` e tudo o mais ficam de fora por construção: uma pasta nova no vault nasce invisível para o bot. Alterar essa tupla é alterar o que o Telegram pode ver — `tests/test_consulta.py::test_diario_nunca_aparece` existe para essa mudança não passar despercebida.
 

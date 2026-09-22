@@ -546,7 +546,7 @@ def test_consulta_nunca_alcanca_o_diario(owner, api, vault_falso):
     """O termo digitado volta no eco; o que não pode voltar é o arquivo, o caminho ou o texto."""
     Bot(TOKEN).handle_update(_update("/buscar SENTINELA"))
     texto = api.call_args_list[0].kwargs["text"]
-    assert texto.startswith("Nada com")
+    assert "Nada com" in texto
     assert "Diario" not in texto and "d.md" not in texto
 
 
@@ -581,10 +581,18 @@ def test_timeout_de_rede_nao_degrada_para_texto_cru(owner, api, vault_falso):
 
 
 def test_menu_cobre_todos_os_comandos_que_o_bot_entende(owner, api):
-    """O que o bot atende e o menu não anuncia é comando que ele precisa lembrar sozinho."""
+    """O que o bot atende e o menu não anuncia é comando que ele precisa lembrar sozinho.
+
+    Os atalhos de uma letra e o /0 ficam fora do menu de propósito: o menu é para descobrir,
+    e nove linhas com sinônimo em metade delas descobre pior. Cada verbo anuncia o seu atalho
+    na descrição."""
     nomes = {nome for nome, _ in telegram.MENU}
-    assert set(telegram.PREFIX_COMMANDS) | set(telegram.CONSULTA_COMMANDS) <= nomes
-    assert {"nova", "ajuda"} <= nomes
+    verbos = set(telegram.CONSULTA_COMMANDS.values())
+    assert set(telegram.PREFIX_COMMANDS) <= nomes
+    assert verbos <= nomes
+    assert {"nova"} <= nomes
+    for atalho in ("/0", "/v", "/b", "/h", "/a"):
+        assert any(atalho in descricao for _, descricao in telegram.MENU), atalho
     for nome, descricao in telegram.MENU:
         assert nome.islower() and nome.isascii() and 1 <= len(nome) <= 32
         assert 1 <= len(descricao) <= 256
@@ -603,10 +611,54 @@ def test_menu_que_falha_nao_derruba_nada(owner, api):
     assert telegram.publicar_menu(TOKEN) is False
 
 
-def test_ajuda_anuncia_os_comandos_de_consulta(owner, api):
+def test_atalhos_de_uma_letra_valem(owner, api, vault_falso):
+    for atalho in ("/v", "/0", "/a"):
+        api.reset_mock()
+        Bot(TOKEN).handle_update(_update(atalho))
+        assert api.call_count >= 1, atalho
+        assert api.call_args_list[0].kwargs["parse_mode"] == "HTML"
+
+
+def test_numero_da_resposta_anterior_abre_a_nota(owner, api, vault_falso):
+    """O contrato inteiro do desenho: o /p1 que apareceu na resposta funciona na seguinte."""
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("/ver"))
+    assert "/p1" in api.call_args_list[0].kwargs["text"]
+    api.reset_mock()
+    bot.handle_update(_update("/p1", message_id=8))
+    assert "PPJ" in api.call_args_list[0].kwargs["text"]
+
+
+def test_indice_sem_contexto_explica_em_vez_de_explodir(owner, api, vault_falso):
+    """Depois de um relançamento o bot nasce sem contexto; /p3 não pode virar exceção."""
+    Bot(TOKEN).handle_update(_update("/p3"))
+    texto = api.call_args_list[0].kwargs["text"]
+    assert "/ver" in texto and "parse_mode" not in api.call_args_list[0].kwargs
+
+
+def test_cada_bot_tem_o_seu_contexto(owner, api, vault_falso):
+    assert Bot(TOKEN).contexto is not Bot(TOKEN).contexto
+
+
+def test_indice_nao_confunde_com_captura(owner, api, vault_falso, downloads):
+    """'/p1' é consulta; 'p1' sem barra é texto e tem de virar nota."""
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("p1"))
+    assert bot.session is not None
+    assert bot.session.manifest["mensagens"][0]["texto"] == "p1"
+
+
+def test_comando_parecido_com_indice_mas_invalido_cai_na_ajuda(owner, api, vault_falso):
+    Bot(TOKEN).handle_update(_update("/p"))
+    texto = api.call_args_list[0].kwargs["text"]
+    assert "Capturar" in texto  # _ajuda() de texto puro
+
+
+def test_ajuda_anuncia_os_comandos_de_consulta(owner, api, vault_falso):
     Bot(TOKEN).handle_update(_update("/ajuda"))
     texto = api.call_args_list[0].kwargs["text"]
-    assert "/ver" in texto and "/buscar" in texto and "/hoje" in texto
+    for esperado in ("/0", "/ver", "/buscar", "/hoje", "/p1", "/s1", "/r1", "/tarefa"):
+        assert esperado in texto, esperado
 
 
 def test_acks_de_captura_nao_tem_emoji(owner, api, downloads):

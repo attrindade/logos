@@ -150,6 +150,18 @@ def _sem_emoji(text: str) -> str:
     return text[match.start(1):].strip() if match else text.strip()
 
 
+def _texto_do_wikilink(match: re.Match) -> str:
+    """O que se lê de um `[[alvo#ancora|alias]]`: o alias, senão o alvo, senão a âncora.
+
+    O `#` sozinho é o caso de link interno (`[[#Reunião 2026-08-31]]`), que sem este tratamento
+    chegava no chat como "ver # Reunião 2026-08-31" — a cerquilha não significa nada para quem lê."""
+    alias = (match.group(2) or "").strip()
+    if alias:
+        return alias
+    alvo = (match.group(1) or "").strip()
+    return alvo.split("#", 1)[-1].strip() if "#" in alvo else alvo
+
+
 def limpar(linha: str) -> str:
     """Markdown -> texto legível. Não escapa HTML: quem monta a mensagem escapa depois.
 
@@ -157,7 +169,7 @@ def limpar(linha: str) -> str:
     '-' de um item de lista junto com o emoji destruiria a estrutura que torna a nota legível."""
     recuo = linha[: len(linha) - len(linha.lstrip(" \t"))]
     linha = recuo + _PICTOGRAMAS.sub("", linha[len(recuo):]).lstrip(" \t")
-    linha = _WIKILINK.sub(lambda m: (m.group(2) or m.group(1)).strip(), linha)
+    linha = _WIKILINK.sub(_texto_do_wikilink, linha)
     linha = _LINK_MD.sub(r"\1", linha)
     linha = _NEGRITO.sub(r"\1", linha)
     linha = _RISCADO.sub(r"\1", linha)
@@ -342,6 +354,25 @@ def buscar(termo: str) -> list[tuple[Path, list[tuple[int, str]]]]:
 # Formatação para o chat (HTML da Bot API)
 # ---------------------------------------------------------------------------
 
+# Marcadores: um por tipo de linha, sempre o mesmo. Emoji aqui é semântica, não enfeite — é o
+# que deixa a resposta reconhecível antes de ser lida. O que vem do vault continua passando por
+# `_PICTOGRAMAS`, porque o emoji do template herdado não marca coisa nenhuma.
+MARCA_PROJETO = "\U0001f4c1"
+MARCA_NOTA = "\U0001f4c4"
+MARCA_SECAO = "\u25b8"
+MARCA_BUSCA = "\U0001f50e"
+MARCA_BRIEFING = "\u2600\ufe0f"
+MARCA_DICA = "\U0001f4a1"
+MARCA_NADA = "\u2205"
+MARCA_INICIO = "\U0001f9ed"
+
+MAX_ATALHOS_INICIO = 5
+
+LIMITE_CITACAO = 700   # acima disso a citação nasce recolhida, com um toque para expandir
+
+_TAG_CITACAO = re.compile(r"<blockquote(?: expandable)?>|</blockquote>")
+
+
 def esc(text: str) -> str:
     return html.escape(text, quote=False)
 
@@ -349,7 +380,7 @@ def esc(text: str) -> str:
 def sem_tags(text: str) -> str:
     """Desfaz a formatação. Só o caminho de degradação do bot usa: se a API recusar o HTML,
     a resposta vai crua em vez de não ir."""
-    return html.unescape(re.sub(r"</?(?:b|i|u|s|code|pre|a)\b[^>]*>", "", text))
+    return html.unescape(re.sub(r"</?(?:b|i|u|s|code|pre|a|blockquote)\b[^>]*>", "", text))
 
 
 def _data(path: Path) -> str:
@@ -358,29 +389,70 @@ def _data(path: Path) -> str:
 
 def _cortar(text: str, limite: int = MAX_LINHA) -> str:
     text = text.strip()
-    return text if len(text) <= limite else text[: limite - 1].rstrip() + "…"
+    return text if len(text) <= limite else text[: limite - 1].rstrip() + "\u2026"
+
+
+def _quebrar_linha(linha: str, limite: int) -> list[str]:
+    """Parte uma linha maior que o limite, sempre num espaço."""
+    pedacos = []
+    while len(linha) > limite:
+        corte = linha.rfind(" ", 0, limite)
+        corte = corte if corte > limite // 2 else limite
+        pedacos.append(linha[:corte].rstrip())
+        linha = linha[corte:].lstrip()
+    pedacos.append(linha)
+    return pedacos
+
+
+def citacao(texto: str, expansivel: bool | None = None) -> str:
+    """Corpo em `<blockquote>`, recolhido quando é longo.
+
+    O expansível resolve o dilema do índice contra o despejo: a nota chega inteira, mas ocupa
+    quatro linhas na tela até ele tocar. Nenhuma linha de dentro pode passar do limite de uma
+    mensagem, senão o `partir` teria de cortar no meio de uma tag."""
+    if expansivel is None:
+        expansivel = len(texto) > LIMITE_CITACAO
+    linhas = []
+    for linha in texto.splitlines():
+        linhas.extend(_quebrar_linha(linha, LIMITE_MENSAGEM - 120))
+    corpo = "\n".join(linhas)
+    abertura = "<blockquote expandable>" if expansivel else "<blockquote>"
+    return f"{abertura}{corpo}</blockquote>"
+
+
+def _estado_citacao(linha: str, aberto: str | None) -> str | None:
+    for m in _TAG_CITACAO.finditer(linha):
+        aberto = None if m.group(0).startswith("</") else m.group(0)
+    return aberto
 
 
 def partir(texto: str, limite: int = LIMITE_MENSAGEM) -> list[str]:
-    """Divide em mensagens por linha inteira. Nunca corta no meio de uma tag: as tags deste
-    módulo abrem e fecham dentro de uma linha só, então a fronteira de linha é segura —
-    diferente do `_chunks` do telegram.py, que corta por caractere."""
-    partes, atual = [], ""
-    for linha in texto.splitlines(keepends=True):
-        while len(linha) > limite:  # linha monstruosa: corta no espaço mais próximo do fim
-            if atual:
-                partes.append(atual.rstrip())
-                atual = ""
-            corte = linha.rfind(" ", 0, limite)
-            corte = corte if corte > limite // 2 else limite
-            partes.append(linha[:corte].rstrip())
-            linha = linha[corte:].lstrip()
-        if len(atual) + len(linha) > limite:
-            partes.append(atual.rstrip())
-            atual = ""
-        atual += linha
-    if atual.strip():
-        partes.append(atual.rstrip())
+    """Divide em mensagens por linha inteira, fechando e reabrindo a citação na fronteira.
+
+    Cortar por caractere, como o `_chunks` do telegram.py faz, partiria uma tag ao meio e a API
+    recusaria a mensagem. Uma citação que não cabe numa mensagem vira uma citação por mensagem,
+    o que lê melhor do que um bloco truncado."""
+    partes: list[str] = []
+    prefixo = ""       # citação reaberta no começo desta parte
+    atual = ""
+    aberto: str | None = None   # citação aberta no fim de `atual`
+
+    def fechar() -> None:
+        nonlocal prefixo, atual
+        if atual.strip():
+            partes.append(prefixo + atual.rstrip() + ("</blockquote>" if aberto else ""))
+            prefixo = aberto or ""
+        atual = ""
+
+    for bruta in texto.splitlines(keepends=True):
+        fim = "\n" if bruta.endswith("\n") else ""
+        for pedaco in _quebrar_linha(bruta.rstrip("\n"), limite - 60):
+            linha = pedaco + fim
+            if len(prefixo) + len(atual) + len(linha) > limite:
+                fechar()
+            atual += linha
+            aberto = _estado_citacao(linha, aberto)
+    fechar()
     return partes or [""]
 
 
@@ -388,88 +460,206 @@ def _meta_linha(nota: Nota) -> str:
     campos = [nota.meta.get(c) for c in ("status", "quarter")]
     campos = [c for c in campos if c]
     campos.append(f"atualizada {nota.atualizada.strftime('%d/%m')}")
-    return " · ".join(campos)
+    return " \u00b7 ".join(campos)
 
+
+def dica(*sugestoes: str) -> str:
+    """Rodapé com o próximo passo. Toda resposta tem um: é assim que ele aprende o vocabulário
+    sem nunca ler a ajuda."""
+    return f"\n{MARCA_DICA} " + "  \u00b7  ".join(s for s in sugestoes if s)
+
+
+# ---------------------------------------------------------------------------
+# Contexto: o que faz /p1, /s2 e /r3 significarem alguma coisa
+# ---------------------------------------------------------------------------
+
+class Contexto:
+    """Memória curta do chat: a última lista de projetos, a nota aberta e a última busca.
+
+    Em memória e sem persistência, de propósito: o bot é de uma pessoa só, e um índice que
+    sobrevive a um relançamento é pior que nenhum — apontaria para outra nota sem avisar. Depois
+    de uma queda, `/p3` responde que a lista venceu."""
+
+    def __init__(self) -> None:
+        self.projetos: list[Path] = []
+        self.resultados: list[Path] = []
+        self.nota: Path | None = None
+        self.secoes: list[str] = []
+
+    def lembrar_projetos(self, notas: list[Path]) -> None:
+        self.projetos = list(notas)
+
+    def lembrar_resultados(self, notas: list[Path]) -> None:
+        self.resultados = list(notas)
+
+    def lembrar_nota(self, nota: "Nota") -> None:
+        self.nota = nota.path
+        self.secoes = [titulo for titulo, _ in nota.secoes]
+
+    def escolher(self, letra: str, numero: int) -> Path:
+        lista = {"p": self.projetos, "r": self.resultados}[letra]
+        rotulo = {"p": "lista de projetos", "r": "busca"}[letra]
+        if not lista:
+            raise ConsultaError(
+                f"Não tenho essa {rotulo} aqui. Mande /ver ou /buscar de novo."
+            )
+        if not 1 <= numero <= len(lista):
+            raise ConsultaError(f"A {rotulo} tem {len(lista)} itens, e você pediu o {numero}.")
+        return lista[numero - 1]
+
+
+# ---------------------------------------------------------------------------
+# Renderização
+# ---------------------------------------------------------------------------
 
 def render_projetos(notas: list[Path]) -> str:
     if not notas:
-        return "Nenhum projeto ativo em <code>work/active</code>."
-    linhas = ["<b>Projetos ativos</b>", ""]
-    for path in notas[:MAX_PROJETOS]:
-        linhas.append(f"{esc(path.stem)} — {_data(path)}")
-    linhas += ["", "<code>/ver &lt;nome&gt;</code> abre um deles."]
-    return "\n".join(linhas)
+        return f"{MARCA_NADA} Nenhum projeto ativo em <code>work/active</code>."
+    linhas = [f"{MARCA_PROJETO} <b>Projetos ativos</b>", ""]
+    for indice, path in enumerate(notas[:MAX_PROJETOS], 1):
+        linhas.append(f"/p{indice}  <b>{esc(path.stem)}</b>  <i>{_data(path)}</i>")
+    return "\n".join(linhas) + dica("/p1 abre o primeiro", "/buscar termo", "/ajuda")
 
 
-def _primeira_palavra(nome: str) -> str:
-    return _fold(nome.split()[0]) if nome.split() else _fold(nome)
-
-
-def render_nota(nota: Nota) -> str:
-    cabeca = [f"<b>{esc(nota.titulo)}</b>", esc(_meta_linha(nota))]
+def render_nota(nota: Nota, marca: str = MARCA_NOTA) -> str:
+    cabeca = [f"{marca} <b>{esc(nota.titulo)}</b>", f"<i>{esc(_meta_linha(nota))}</i>"]
     descricao = nota.meta.get("description")
-    if descricao:
-        cabeca += ["", esc(_cortar(descricao, 300))]
 
     inteira = "\n\n".join(
         [nota.intro] + [f"{titulo}\n{_corpo(linhas)}" for titulo, linhas in nota.secoes]
     ).strip()
 
     if len(inteira) <= LIMITE_NOTA_INTEIRA:
-        corpo = esc(inteira) if inteira else "Nota sem conteúdo além do frontmatter."
-        return "\n".join(cabeca + ["", corpo])
+        corpo = citacao(esc(inteira)) if inteira else "<i>Nota sem conteúdo além do frontmatter.</i>"
+        return "\n".join(cabeca + ["", corpo]) + dica("/ver volta aos projetos", "/ajuda")
 
-    # Nota longa vira índice: 14 KB de uma vez, no celular, não é leitura.
+    # Nota longa: as seções viram comandos. Ninguém lê 14 KB de uma vez no celular, e digitar
+    # o nome da seção seria pior do que rolar a nota no Obsidian.
     partes = list(cabeca)
-    if nota.intro:
-        partes += ["", esc(_cortar(nota.intro, 600))]
-    partes += ["", "<b>Seções</b>"]
-    for indice, (titulo, linhas) in enumerate(nota.secoes, 1):
-        partes.append(f"{indice}. {esc(titulo)}")
-    partes += ["", f"<code>/ver {esc(_primeira_palavra(nota.nome))} &lt;n&gt;</code> abre uma seção."]
-    return "\n".join(partes)
+    if descricao:
+        partes += ["", citacao(esc(_cortar(descricao, 400)), expansivel=False)]
+    elif nota.intro:
+        partes += ["", citacao(esc(_cortar(nota.intro, 400)), expansivel=False)]
+    partes += ["", f"<b>{len(nota.secoes)} seções</b>"]
+    for indice, (titulo, _) in enumerate(nota.secoes, 1):
+        partes.append(f"/s{indice}  {MARCA_SECAO} {esc(titulo)}")
+    return "\n".join(partes) + dica("/s1 abre a primeira", "/ver volta aos projetos")
 
 
 def render_secao(nota: Nota, indice: int) -> str:
     if not nota.secoes:
-        raise ConsultaError(f"{nota.titulo} não tem seções.")
+        raise ConsultaError(f"{nota.titulo} não tem seções. A nota inteira já veio acima.")
     if not 1 <= indice <= len(nota.secoes):
         raise ConsultaError(f"{nota.titulo} tem {len(nota.secoes)} seções, e você pediu a {indice}.")
     titulo, linhas = nota.secoes[indice - 1]
     corpo = _corpo(linhas) or "Seção vazia."
-    return f"<b>{esc(nota.titulo)} — {esc(titulo)}</b>\n\n{esc(corpo)}"
+    cabeca = (
+        f"{MARCA_SECAO} <b>{esc(titulo)}</b>\n"
+        f"<i>{esc(nota.titulo)} \u00b7 {indice} de {len(nota.secoes)}</i>"
+    )
+    vizinhas = []
+    if indice < len(nota.secoes):
+        vizinhas.append(f"/s{indice + 1} {esc(nota.secoes[indice][0])}")
+    if indice > 1:
+        vizinhas.append(f"/s{indice - 1} anterior")
+    vizinhas.append("/s0 índice")
+    return f"{cabeca}\n\n{citacao(esc(corpo))}" + dica(*vizinhas)
 
 
 def render_busca(termo: str, achados: list[tuple[Path, list[tuple[int, str]]]]) -> str:
     if not achados:
-        return f"Nada com “{esc(termo)}” nas notas que eu leio."
-    partes = [f"<b>{esc(termo)}</b> — {len(achados)} arquivo(s)", ""]
-    for path, linhas in achados:
-        partes.append(f"<b>{esc(path.stem)}</b>  <code>{esc(rel(path))}</code>")
-        for _, linha in linhas:
-            partes.append(f"  {esc(_cortar(linha))}")
+        return (
+            f"{MARCA_NADA} Nada com <b>{esc(termo)}</b> nas notas que eu leio."
+            + dica("/ver lista os projetos", "/ajuda")
+        )
+    partes = [f"{MARCA_BUSCA} <b>{esc(termo)}</b> \u2014 {len(achados)} arquivo(s)", ""]
+    for indice, (path, linhas) in enumerate(achados, 1):
+        partes.append(f"/r{indice}  <b>{esc(path.stem)}</b>  <i>{esc(_pasta(path))}</i>")
+        trecho = "\n".join(esc(_cortar(linha)) for _, linha in linhas)
+        partes.append(citacao(trecho))
         partes.append("")
-    partes.append("<code>/ver &lt;nome&gt;</code> abre um deles.")
-    return "\n".join(partes)
+    return "\n".join(partes).rstrip() + dica("/r1 abre o primeiro", "/ver lista os projetos")
 
 
 def render_ambiguo(nome: str, candidatos: list[Path]) -> str:
-    partes = [f"“{esc(nome)}” casa com mais de uma nota:", ""]
-    for path in candidatos[:10]:
-        partes.append(f"{esc(path.stem)}  <code>{esc(rel(path))}</code>")
+    partes = [f"<b>{esc(nome)}</b> casa com mais de uma nota:", ""]
+    for indice, path in enumerate(candidatos[:10], 1):
+        partes.append(f"/r{indice}  <b>{esc(path.stem)}</b>  <i>{esc(_pasta(path))}</i>")
     if len(candidatos) > 10:
-        partes.append(f"… e mais {len(candidatos) - 10}.")
-    return "\n".join(partes)
+        partes.append(f"<i>\u2026 e mais {len(candidatos) - 10}.</i>")
+    return "\n".join(partes) + dica("/r1 abre o primeiro")
+
+
+def _pasta(path: Path) -> str:
+    caminho = rel(path)
+    return caminho.rsplit("/", 1)[0] if "/" in caminho else caminho
+
+
+def render_inicio(notas: list[Path], briefing: Path | None) -> str:
+    """Tela inicial do `/0`: para onde ir, com os atalhos já carregados.
+
+    Não pergunta e espera resposta — mostra as saídas possíveis já numeradas, que é mais rápido
+    do que perguntar. Os `/pN` daqui valem na hora, porque o contexto foi preenchido junto."""
+    partes = [f"{MARCA_INICIO} <b>Para onde?</b>", ""]
+    if notas:
+        partes.append(f"{MARCA_PROJETO} <b>Projetos</b>")
+        for indice, path in enumerate(notas[:MAX_ATALHOS_INICIO], 1):
+            partes.append(f"/p{indice}  {esc(path.stem)}  <i>{_data(path)}</i>")
+        if len(notas) > MAX_ATALHOS_INICIO:
+            partes.append(f"/v  <i>e mais {len(notas) - MAX_ATALHOS_INICIO}</i>")
+        partes.append("")
+    if briefing is not None:
+        partes.append(f"{MARCA_BRIEFING} /h  <b>Briefing</b>  <i>{_data(briefing)}</i>")
+    partes.append(f"{MARCA_BUSCA} /b &lt;termo&gt;  <b>Procurar</b> em tudo que eu leio")
+    return "\n".join(partes) + dica("/a explica o resto", "ou mande texto/voz para capturar")
+
+
+def render_ajuda() -> str:
+    """Uma tela. É o único texto que ele vai ler para aprender o bot inteiro."""
+    return (
+        f"{MARCA_DICA} <b>Como mexer aqui</b>\n"
+        "\n"
+        f"{MARCA_INICIO} <code>/0</code> \u2014 na dúvida, sempre este. Mostra para onde ir.\n"
+        "\n"
+        "<b>Consultar</b> \u2014 um verbo e um alvo:\n"
+        "<code>/ver</code> projetos ativos\n"
+        "<code>/ver ppj</code> abre uma nota\n"
+        "<code>/buscar renato</code> procura nas notas\n"
+        "<code>/hoje</code> o briefing mais recente\n"
+        "\n"
+        "<b>Os números das respostas são comandos.</b> Toque ou digite:\n"
+        f"{MARCA_PROJETO} <code>/p1</code> projeto da lista\n"
+        f"{MARCA_SECAO} <code>/s1</code> seção da nota aberta  \u00b7  <code>/s0</code> índice\n"
+        f"{MARCA_BUSCA} <code>/r1</code> resultado da busca\n"
+        "\n"
+        "<b>Atalhos de uma letra:</b> <code>/v</code> <code>/b</code> <code>/h</code> "
+        "<code>/a</code>\n"
+        "\n"
+        "<b>Um fluxo inteiro:</b>\n"
+        "<code>/0</code> \u2192 <code>/p1</code> \u2192 <code>/s3</code>\n"
+        "\n"
+        "<b>Capturar</b> segue igual: mande texto, voz, foto, PDF ou link.\n"
+        "<code>/tarefa</code> <code>/ideia</code> <code>/planejamento</code> "
+        "<code>/diario</code>  \u00b7  <code>/nova</code> fecha a sessão."
+    )
 
 
 # ---------------------------------------------------------------------------
 # Comandos (o bot só despacha; a lógica e as mensagens moram aqui)
 # ---------------------------------------------------------------------------
 
-def cmd_ver(argumento: str) -> str:
+def _abrir(path: Path, ctx: Contexto, marca: str = MARCA_NOTA) -> str:
+    nota = carregar(path)
+    ctx.lembrar_nota(nota)
+    return render_nota(nota, marca)
+
+
+def cmd_ver(argumento: str, ctx: Contexto) -> str:
     argumento = (argumento or "").strip()
     if not argumento:
-        return render_projetos(projetos())
+        lista = projetos()
+        ctx.lembrar_projetos(lista)
+        return render_projetos(lista)
 
     nome, indice = argumento, None
     partes = argumento.rsplit(maxsplit=1)
@@ -478,23 +668,54 @@ def cmd_ver(argumento: str) -> str:
 
     candidatos = resolver(nome)
     if not candidatos:
-        return f"Não achei nota com “{esc(nome)}”.\n\n<code>/ver</code> lista os projetos ativos."
+        return (
+            f"{MARCA_NADA} Não achei nota com <b>{esc(nome)}</b>."
+            + dica("/ver lista os projetos", "/buscar " + esc(nome))
+        )
     if len(candidatos) > 1:
+        ctx.lembrar_resultados(candidatos)
         return render_ambiguo(nome, candidatos)
 
+    if indice is None:
+        return _abrir(candidatos[0], ctx)
     nota = carregar(candidatos[0])
-    return render_secao(nota, indice) if indice is not None else render_nota(nota)
+    ctx.lembrar_nota(nota)
+    return render_secao(nota, indice)
 
 
-def cmd_buscar(termo: str) -> str:
+def cmd_buscar(termo: str, ctx: Contexto) -> str:
     termo = (termo or "").strip()
     if not termo:
-        return "Uso: <code>/buscar &lt;termo&gt;</code>"
-    return render_busca(termo, buscar(termo))
+        return "Uso: <code>/buscar &lt;termo&gt;</code>" + dica("/buscar renato", "/ajuda")
+    achados = buscar(termo)
+    ctx.lembrar_resultados([path for path, _ in achados])
+    return render_busca(termo, achados)
 
 
-def cmd_hoje() -> str:
+def cmd_hoje(ctx: Contexto) -> str:
     path = briefing_recente()
     if path is None:
-        return "Nenhum briefing em <code>briefings/</code>."
-    return f"{render_nota(carregar(path))}\n\n<code>{esc(rel(path))}</code>"
+        return f"{MARCA_NADA} Nenhum briefing em <code>briefings/</code>."
+    return _abrir(path, ctx, MARCA_BRIEFING)
+
+
+def cmd_indice(letra: str, numero: int, ctx: Contexto) -> str:
+    """`/p3`, `/s2`, `/r1`. O número que apareceu na resposta anterior é o comando seguinte —
+    é isso que torna o bot aprendível sem ler a ajuda."""
+    if letra == "s":
+        if ctx.nota is None:
+            raise ConsultaError("Nenhuma nota aberta. Mande /ver e escolha uma.")
+        nota = carregar(ctx.nota)
+        ctx.lembrar_nota(nota)
+        return render_nota(nota) if numero == 0 else render_secao(nota, numero)
+    return _abrir(ctx.escolher(letra, numero), ctx)
+
+
+def cmd_inicio(ctx: Contexto) -> str:
+    lista = projetos()
+    ctx.lembrar_projetos(lista)
+    return render_inicio(lista, briefing_recente())
+
+
+def cmd_ajuda() -> str:
+    return render_ajuda()

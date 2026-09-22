@@ -32,6 +32,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import sys
 import threading
@@ -65,7 +66,20 @@ EXIT_OK, EXIT_FAILED, EXIT_NOT_CONFIGURED = 0, 1, 2
 # comando -> primeira palavra que a triagem entende
 PREFIX_COMMANDS = {"tarefa": "tarefa", "ideia": "ideia", "planejamento": "planejamento", "diario": "diário"}
 # Comandos de leitura do vault. Somente leitura: não abrem, não alimentam e não fecham sessão.
-CONSULTA_COMMANDS = ("ver", "buscar", "hoje")
+# Um atalho de uma letra por verbo, e nada além disso: sinônimo demais é vocabulário para
+# decorar, que é o oposto do pedido. `0` é a tela inicial — o comando para quem não lembra
+# de nenhum outro.
+CONSULTA_COMMANDS = {
+    "0": "inicio", "inicio": "inicio", "menu": "inicio",
+    "ver": "ver", "v": "ver",
+    "buscar": "buscar", "b": "buscar",
+    "hoje": "hoje", "h": "hoje",
+    "ajuda": "ajuda", "a": "ajuda",
+}
+
+# `/p3`, `/s2`, `/r1`: o número que apareceu na resposta anterior vira o comando seguinte.
+# É o que dá a curva de aprendizado curta — nada para memorizar, o próximo passo está na tela.
+INDICE_RE = re.compile(r"^([psr])(\d{1,3})$")
 KIND_LABELS = {
     "texto": "texto", "voz": "voz", "audio": "áudio", "foto": "foto",
     "documento": "documento", "localizacao": "localização",
@@ -75,15 +89,16 @@ KIND_LABELS = {
 # e um comando que só existe no texto da ajuda é um comando que ele precisa lembrar — que é
 # justamente o que o sistema dele não pode exigir. Captura primeiro, consulta depois.
 MENU = [
+    ("inicio", "para onde ir  (atalho: /0)"),
+    ("ver", "projetos ativos, ou /ver ppj  (atalho: /v)"),
+    ("buscar", "procura um termo nas notas  (atalho: /b)"),
+    ("hoje", "o briefing mais recente  (atalho: /h)"),
+    ("ajuda", "como mexer aqui  (atalho: /a)"),
     ("tarefa", "registra uma tarefa"),
     ("ideia", "registra uma ideia"),
     ("planejamento", "registra um planejamento"),
     ("diario", "registra no diário (passa pela nuvem)"),
     ("nova", "fecha a sessão de captura agora"),
-    ("ver", "projetos ativos, ou /ver <nome> para abrir um"),
-    ("buscar", "procura um termo nas notas"),
-    ("hoje", "o briefing mais recente"),
-    ("ajuda", "o que dá para fazer aqui"),
 ]
 
 DIARIO_AVISO = (
@@ -98,15 +113,12 @@ def _fmt_min(value: float) -> str:
 
 def _ajuda() -> str:
     return (
-        "Capturar\n"
-        "Mande texto, voz, foto, PDF, documento, link ou localização. Mensagens com até "
-        f"{_fmt_min(config.TELEGRAM_WINDOW_MIN)} min de intervalo viram uma nota só.\n"
+        "Capturar: mande texto, voz, foto, PDF, documento, link ou localização. Mensagens "
+        f"com até {_fmt_min(config.TELEGRAM_WINDOW_MIN)} min de intervalo viram uma nota só.\n"
         "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
         "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela.\n"
         "\n"
-        "Consultar\n"
-        "/ver lista os projetos ativos · /ver <nome> abre um · /ver <nome> <n> abre uma seção\n"
-        "/buscar <termo> procura nas notas · /hoje mostra o briefing mais recente"
+        "Consultar: /0 mostra para onde ir. /ajuda explica o resto."
     )
 
 
@@ -319,6 +331,9 @@ class Bot:
     def __init__(self, token: str):
         self.token = token
         self.session: Session | None = None
+        # Memória curta da consulta, para `/p3` e `/s2` significarem alguma coisa. Morre com
+        # o processo de propósito: ver consulta.Contexto.
+        self.contexto = consulta.Contexto()
 
     def reply(self, message: dict, text: str) -> None:
         try:
@@ -400,7 +415,7 @@ class Bot:
     def _handle_command(self, message: dict, command: str, rest: str) -> None:
         if command == "start":
             self.reply(message, "Logos já está conectado a este chat.\n\n" + _ajuda())
-        elif command in CONSULTA_COMMANDS:
+        elif command in CONSULTA_COMMANDS or INDICE_RE.match(command):
             self._consultar(message, command, rest)
         elif command in PREFIX_COMMANDS:
             if not rest:
@@ -423,12 +438,21 @@ class Bot:
     def _consultar(self, message: dict, command: str, rest: str) -> None:
         """Leitura do vault. Não toca a sessão de captura aberta: perguntar não é capturar."""
         try:
-            if command == "ver":
-                texto = consulta.cmd_ver(rest)
-            elif command == "buscar":
-                texto = consulta.cmd_buscar(rest)
+            indice = INDICE_RE.match(command)
+            if indice:
+                texto = consulta.cmd_indice(indice.group(1), int(indice.group(2)), self.contexto)
             else:
-                texto = consulta.cmd_hoje()
+                verbo = CONSULTA_COMMANDS[command]
+                if verbo == "ver":
+                    texto = consulta.cmd_ver(rest, self.contexto)
+                elif verbo == "buscar":
+                    texto = consulta.cmd_buscar(rest, self.contexto)
+                elif verbo == "hoje":
+                    texto = consulta.cmd_hoje(self.contexto)
+                elif verbo == "ajuda":
+                    texto = consulta.cmd_ajuda()
+                else:
+                    texto = consulta.cmd_inicio(self.contexto)
         except consulta.ConsultaError as e:
             self.reply(message, str(e))
             return

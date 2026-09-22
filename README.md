@@ -106,15 +106,25 @@ Add `* tg*` to `Inbox/.stignore` when the Inbox is a Syncthing receive-only fold
 
 The same bot reads the vault, with no LLM and without writing anything:
 
-| Command | What it does |
-| :--- | :--- |
-| `/ver` | lists active projects, most recently touched first |
-| `/ver <name>` | opens the note; long ones come back as a section index |
-| `/ver <name> <n>` | opens section `n` of that note |
-| `/buscar <term>` | matching lines grouped by file (accent- and case-insensitive) |
-| `/hoje` | the most recent briefing in `briefings/` |
+| Command | Shortcut | What it does |
+| :--- | :--- | :--- |
+| `/inicio` | `/0` | where to go: projects, briefing and search, already numbered |
+| `/ver` | `/v` | lists active projects, most recently touched first |
+| `/ver <name>` | | opens the note; long ones come back as a section index |
+| `/buscar <term>` | `/b` | matching lines grouped by file (accent- and case-insensitive) |
+| `/hoje` | `/h` | the most recent briefing in `briefings/` |
+| `/ajuda` | `/a` | the whole system on one screen |
 
-Output goes out as Bot API HTML, with the vault's Markdown reduced to readable text: wikilinks become their alias, pictographs are dropped, table separators disappear, frontmatter stays out of search results. `send()` and `notify()` remain plain text — turning HTML on for them would break the briefing, which sends `<` and `&` unescaped.
+**The numbers in each reply are commands.** That is what keeps the learning curve short: nothing
+to memorize, because the next step is already on screen. `/p1` opens the first project of the
+last listing, `/s3` the third section of the open note (`/s0` goes back to the index) and `/r2`
+the second search result. A full flow is `/0` → `/p1` → `/s3`, typing no names at all.
+
+These indexes live in a per-process `consulta.Contexto`, in memory. They deliberately do not
+persist: an index surviving a restart would silently point at a different note, so after a crash
+`/p3` says the listing expired instead of opening the wrong thing.
+
+Output goes out as Bot API HTML, with the vault's Markdown reduced to readable text: wikilinks become their alias, pictographs are dropped, table separators disappear, frontmatter stays out of search results. Note bodies go in `<blockquote>`, or `<blockquote expandable>` past `LIMITE_CITACAO`. That is why `partir` closes and reopens the quote at message boundaries: splitting by character would cut a tag in half. Each kind of reply opens with a fixed marker and ends with a hint for the next command; the emoji is semantics, not decoration, and vault text is still stripped of pictographs. `send()` and `notify()` remain plain text — turning HTML on for them would break the briefing, which sends `<` and `&` unescaped.
 
 **Readable folders are an allowlist** in `consulta.ALLOWED_SUBDIRS` (`work/active`, `brain`, `org`, `briefings`, `capturas/Inbox`, `capturas/Planejamento`), relative to `vault_dir`. `capturas/Diario/` and everything else stay out by construction: a new folder in the vault is born invisible to the bot. Changing that tuple changes what Telegram can see — `tests/test_consulta.py::test_diario_nunca_aparece` exists so the change cannot pass unnoticed.
 
