@@ -71,6 +71,21 @@ KIND_LABELS = {
     "documento": "documento", "localizacao": "localização",
 }
 
+# Menu que o Telegram mostra quando ele digita "/". Sem `setMyCommands` o app não sugere nada,
+# e um comando que só existe no texto da ajuda é um comando que ele precisa lembrar — que é
+# justamente o que o sistema dele não pode exigir. Captura primeiro, consulta depois.
+MENU = [
+    ("tarefa", "registra uma tarefa"),
+    ("ideia", "registra uma ideia"),
+    ("planejamento", "registra um planejamento"),
+    ("diario", "registra no diário (passa pela nuvem)"),
+    ("nova", "fecha a sessão de captura agora"),
+    ("ver", "projetos ativos, ou /ver <nome> para abrir um"),
+    ("buscar", "procura um termo nas notas"),
+    ("hoje", "o briefing mais recente"),
+    ("ajuda", "o que dá para fazer aqui"),
+]
+
 DIARIO_AVISO = (
     "Lembrete: Diário pelo Telegram passa pela nuvem do Telegram. "
     "O caminho do Diário continua sendo o gravador + Syncthing."
@@ -592,6 +607,7 @@ class Bot:
                 if username is None:
                     username = call(self.token, "getMe")["username"]
                     logger.info(f"Telegram: bot @{username} conectado (long polling)")
+                    publicar_menu(self.token)
                 params = {"timeout": POLL_TIMEOUT_S, "allowed_updates": ["message"]}
                 if offset is not None:
                     params["offset"] = offset
@@ -623,6 +639,21 @@ class Bot:
                 tracker.set_bot("error", username=username, last_error=str(e))
                 stop.wait(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF_S)
+
+
+def publicar_menu(token: str) -> bool:
+    """Registra o MENU no Telegram, para o app sugerir os comandos ao digitar "/".
+
+    Idempotente e sem consequência: é estado do lado do servidor, e republicar o mesmo menu não
+    muda nada. Nunca levanta — menu que falha não pode derrubar o polling que traz as capturas.
+    """
+    comandos = [{"command": nome, "description": texto} for nome, texto in MENU]
+    try:
+        call(token, "setMyCommands", commands=comandos)
+        return True
+    except Exception as e:
+        logger.warning(f"Telegram: menu de comandos não publicado: {e}")
+        return False
 
 
 def start_bot_thread(stop: threading.Event) -> threading.Thread | None:

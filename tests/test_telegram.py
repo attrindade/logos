@@ -580,6 +580,29 @@ def test_timeout_de_rede_nao_degrada_para_texto_cru(owner, api, vault_falso):
     assert api.call_count == 1
 
 
+def test_menu_cobre_todos_os_comandos_que_o_bot_entende(owner, api):
+    """O que o bot atende e o menu não anuncia é comando que ele precisa lembrar sozinho."""
+    nomes = {nome for nome, _ in telegram.MENU}
+    assert set(telegram.PREFIX_COMMANDS) | set(telegram.CONSULTA_COMMANDS) <= nomes
+    assert {"nova", "ajuda"} <= nomes
+    for nome, descricao in telegram.MENU:
+        assert nome.islower() and nome.isascii() and 1 <= len(nome) <= 32
+        assert 1 <= len(descricao) <= 256
+        assert not any(ord(c) > 0x2500 for c in descricao)
+
+
+def test_menu_publicado_ao_conectar(owner, api):
+    assert telegram.publicar_menu(TOKEN) is True
+    [chamada] = api.call_args_list
+    assert chamada.args[1] == "setMyCommands"
+    assert {c["command"] for c in chamada.kwargs["commands"]} == {n for n, _ in telegram.MENU}
+
+
+def test_menu_que_falha_nao_derruba_nada(owner, api):
+    api.side_effect = TelegramError("setMyCommands: 400 Bad Request", code=400)
+    assert telegram.publicar_menu(TOKEN) is False
+
+
 def test_ajuda_anuncia_os_comandos_de_consulta(owner, api):
     Bot(TOKEN).handle_update(_update("/ajuda"))
     texto = api.call_args_list[0].kwargs["text"]
