@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+import urllib3
 import yaml
 
 from . import config, consulta
@@ -184,6 +185,28 @@ def _redact(text: str, token: str) -> str:
     return text.replace(token, "<token>") if token else text
 
 
+# Uma conexão reaproveitada para todas as chamadas, em vez de uma nova por chamada.
+#
+# Medido em 22/09/2026 nesta máquina: com a conexão quente, o `getMe` responde em ~1 s; a
+# primeira chamada, que precisa abrir TCP + TLS, falhou por timeout aos 10 s. O caro aqui não é
+# a Bot API, é o aperto de mão com ela — e o `requests.post` solto abria um a cada chamada.
+# Isso explicava a fila inteira de sintomas: `getMe` falhando na subida, `getUpdates` expirando
+# sem nem devolver a lista vazia, e a resposta de uma consulta demorando quase um minuto para
+# sair, porque o envio pagava outro aperto de mão.
+#
+# `read=0` é deliberado: repetir uma leitura que expirou num POST arriscaria mandar a mesma
+# mensagem duas vezes. Erro de conexão pode ser repetido em paz, porque o pedido não chegou a
+# sair. O long poll segura uma conexão por POLL_TIMEOUT_S, então o pool precisa de folga para o
+# `notify` e as respostas do pipeline, que saem de outra thread.
+_RETENTATIVA = urllib3.util.Retry(
+    total=2, connect=2, read=0, status=0, other=0, backoff_factor=0.5, allowed_methods=None,
+)
+_sessao = requests.Session()
+_sessao.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=4, pool_maxsize=8, max_retries=_RETENTATIVA,
+))
+
+
 def call(token: str, method: str, *, http_timeout: float = 15, files: dict | None = None, **params):
     """Chama um método da Bot API. Erros nunca carregam o token (a URL o contém).
 
@@ -191,9 +214,9 @@ def call(token: str, method: str, *, http_timeout: float = 15, files: dict | Non
     url = f"{API}/bot{token}/{method}"
     try:
         if files:
-            resp = requests.post(url, data=params, files=files, timeout=http_timeout)
+            resp = _sessao.post(url, data=params, files=files, timeout=http_timeout)
         else:
-            resp = requests.post(url, json=params, timeout=http_timeout)
+            resp = _sessao.post(url, json=params, timeout=http_timeout)
     except requests.Timeout as e:
         raise TelegramError(f"{method}: {_redact(str(e), token)}", timeout=True) from None
     except requests.RequestException as e:
@@ -223,7 +246,7 @@ def download_file(token: str, file_id: str, dest: Path) -> None:
     tmp = dest.with_name(f".{dest.name}.tmp")
     for tentativa in range(1, DOWNLOAD_TENTATIVAS + 1):
         try:
-            with requests.get(url, stream=True, timeout=60) as resp:
+            with _sessao.get(url, stream=True, timeout=60) as resp:
                 resp.raise_for_status()
                 with open(tmp, "wb") as f:
                     for chunk in resp.iter_content(1 << 16):
@@ -462,7 +485,12 @@ class Bot:
             self.reply(message, _ajuda())
 
     def _consultar(self, message: dict, command: str, rest: str) -> None:
-        """Leitura do vault. Não toca a sessão de captura aberta: perguntar não é capturar."""
+        """Leitura do vault. Não toca a sessão de captura aberta: perguntar não é capturar.
+
+        Registra o tempo de resposta: sem isso, uma consulta bem-sucedida não deixa rastro no
+        log, e "o bot demorou" não se distingue de "a mensagem não chegou". Só o nome do
+        comando vai para o log — o termo buscado, não."""
+        inicio = time.monotonic()
         try:
             indice = INDICE_RE.match(command)
             if indice:
@@ -487,6 +515,7 @@ class Bot:
             self.reply(message, "Não consegui ler o vault agora. O log do Logos tem o motivo.")
             return
         self.reply_html(message, texto)
+        logger.info(f"Telegram: /{command} respondido em {time.monotonic() - inicio:.1f}s")
 
     @staticmethod
     def _classify(message: dict, text: str) -> tuple[str | None, dict | None, str]:

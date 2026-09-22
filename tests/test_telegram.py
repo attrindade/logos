@@ -356,7 +356,7 @@ def test_download_grava_por_temporario(env):
     resp.__enter__.return_value = resp
     resp.iter_content.return_value = [b"OggS", b"dados"]
     with patch.object(telegram, "call", return_value={"file_path": "voice/file_1.oga"}), \
-         patch.object(telegram.requests, "get", return_value=resp) as get:
+         patch.object(telegram._sessao, "get", return_value=resp) as get:
         telegram.download_file(TOKEN, "abc", dest)
     assert get.call_args.args[0] == f"https://api.telegram.org/file/bot{TOKEN}/voice/file_1.oga"
     assert dest.read_bytes() == b"OggSdados"
@@ -365,7 +365,7 @@ def test_download_grava_por_temporario(env):
 
 def test_erros_de_rede_nao_vazam_o_token():
     err = requests.ConnectionError(f"HTTPSConnectionPool: /bot{TOKEN}/getUpdates refused")
-    with patch.object(telegram.requests, "post", side_effect=err):
+    with patch.object(telegram._sessao, "post", side_effect=err):
         with pytest.raises(TelegramError) as exc:
             telegram.call(TOKEN, "getUpdates")
     assert TOKEN not in str(exc.value)
@@ -375,7 +375,7 @@ def test_timeout_do_getupdates_nao_colide_com_o_timeout_http():
     """Regressão: `timeout` é parâmetro do getUpdates; o timeout HTTP é outro argumento."""
     resp = MagicMock()
     resp.json.return_value = {"ok": True, "result": []}
-    with patch.object(telegram.requests, "post", return_value=resp) as post:
+    with patch.object(telegram._sessao, "post", return_value=resp) as post:
         assert telegram.call(TOKEN, "getUpdates", http_timeout=35, timeout=30, allowed_updates=["message"]) == []
     assert post.call_args.kwargs["timeout"] == 35
     assert post.call_args.kwargs["json"] == {"timeout": 30, "allowed_updates": ["message"]}
@@ -384,7 +384,7 @@ def test_timeout_do_getupdates_nao_colide_com_o_timeout_http():
 def test_erro_da_api_carrega_o_codigo():
     resp = MagicMock()
     resp.json.return_value = {"ok": False, "error_code": 409, "description": "Conflict"}
-    with patch.object(telegram.requests, "post", return_value=resp):
+    with patch.object(telegram._sessao, "post", return_value=resp):
         with pytest.raises(TelegramError) as exc:
             telegram.call(TOKEN, "getUpdates")
     assert exc.value.code == 409
@@ -775,7 +775,7 @@ def test_download_tenta_de_novo_antes_de_desistir(owner, tmp_path, monkeypatch):
 
     destino = tmp_path / "98.oga"
     with patch.object(telegram, "call", return_value={"file_path": "voice/98.oga"}):
-        with patch.object(telegram.requests, "get", side_effect=fake_get):
+        with patch.object(telegram._sessao, "get", side_effect=fake_get):
             telegram.download_file(TOKEN, "f-98", destino)
 
     assert len(tentativas) == 3
@@ -789,7 +789,7 @@ def test_download_desiste_depois_do_limite(owner, tmp_path, monkeypatch):
         raise requests.ConnectionError("Connection broken")
 
     with patch.object(telegram, "call", return_value={"file_path": "voice/98.oga"}):
-        with patch.object(telegram.requests, "get", side_effect=sempre_falha):
+        with patch.object(telegram._sessao, "get", side_effect=sempre_falha):
             with pytest.raises(TelegramError):
                 telegram.download_file(TOKEN, "f-98", tmp_path / "98.oga")
     # Nem o destino nem o temporário ficam para trás.
@@ -798,7 +798,7 @@ def test_download_desiste_depois_do_limite(owner, tmp_path, monkeypatch):
 
 
 def test_timeout_marca_a_excecao(owner):
-    with patch.object(telegram.requests, "post", side_effect=requests.Timeout("Read timed out")):
+    with patch.object(telegram._sessao, "post", side_effect=requests.Timeout("Read timed out")):
         with pytest.raises(TelegramError) as erro:
             telegram.call(TOKEN, "getUpdates")
     assert erro.value.timeout is True
@@ -852,3 +852,14 @@ def test_timeout_na_subida_nao_recua_exponencialmente(owner, monkeypatch):
         Bot(TOKEN).run_polling(stop)
 
     assert esperas == [telegram.TIMEOUT_RETENTATIVA_S] * 4, esperas
+
+
+def test_toda_chamada_passa_pela_sessao():
+    """Abrir conexão nova por chamada era o que fazia o bot demorar nesta rede: o aperto de mão
+    com api.telegram.org custa mais que a chamada. Voltar a `requests.post` solto refaria o
+    problema — e, de quebra, os testes passariam a bater na rede de verdade."""
+    fonte = Path(telegram.__file__).read_text(encoding="utf-8")
+    corpo = fonte.split("_sessao.mount(", 1)[1]
+    for chamada in ("requests.post(", "requests.get("):
+        assert chamada not in corpo, f"{chamada} direto, fora da sessão"
+    assert "_sessao.post(" in corpo and "_sessao.get(" in corpo
