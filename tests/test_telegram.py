@@ -572,6 +572,14 @@ def test_html_recusado_reenvia_sem_formatacao(owner, api, vault_falso):
     assert "<b>" not in segunda.kwargs["text"]
 
 
+def test_timeout_de_rede_nao_degrada_para_texto_cru(owner, api, vault_falso):
+    """Timeout não é recusa de formatação: reenviar sem tags trocaria a resposta boa por uma
+    feia sem motivo, e arriscaria mensagem dobrada se a primeira tiver chegado."""
+    api.side_effect = TelegramError("sendMessage: Read timed out")
+    Bot(TOKEN).handle_update(_update("/ver"))
+    assert api.call_count == 1
+
+
 def test_ajuda_anuncia_os_comandos_de_consulta(owner, api):
     Bot(TOKEN).handle_update(_update("/ajuda"))
     texto = api.call_args_list[0].kwargs["text"]

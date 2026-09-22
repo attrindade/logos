@@ -321,6 +321,10 @@ class Bot:
         `parse_mode` vive só aqui: `send()` e `notify()` mandam texto puro (briefing, avisos de
         job) com `<` e `&` sem escapar, e ligar HTML neles devolveria 400. Se ainda assim a API
         recusar a formatação, reenvia sem tags: consulta entregue feia é melhor que não entregue.
+
+        Só o 400 degrada. Timeout e queda de conexão não são recusa de formatação, e reenviar
+        sem tags nesse caso trocaria a resposta boa por uma feia sem motivo — além de arriscar
+        duas mensagens se a primeira tiver chegado e só a resposta ter se perdido.
         """
         for indice, parte in enumerate(consulta.partir(text)):
             params = {
@@ -336,6 +340,9 @@ class Bot:
             try:
                 call(self.token, "sendMessage", **params)
             except TelegramError as e:
+                if e.code != 400:
+                    logger.warning(f"Telegram: falha ao responder consulta: {e}")
+                    return
                 logger.warning(f"Telegram: HTML recusado ({e}); reenviando sem formatação.")
                 params.pop("parse_mode")
                 params["text"] = consulta.sem_tags(parte)
