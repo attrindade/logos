@@ -681,3 +681,124 @@ def test_cli_nao_importa_status_nem_toca_no_status_json(tmp_path):
     out = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env, capture_output=True, text=True, timeout=60)
     assert out.stdout.split() == ["2", "False"], out.stderr
     assert not (tmp_path / "state" / "status.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Rede instável: o que não pode custar latência nem mensagem
+# ---------------------------------------------------------------------------
+
+def test_timeout_do_long_poll_nao_e_erro(owner, monkeypatch):
+    """getUpdates fica pendurado de propósito. Contar isso como falha dobrava a espera a cada
+    oscilação, e o bot passava mais tempo dormindo do que ouvindo."""
+    from logos import status
+
+    estados = []
+    monkeypatch.setattr(status.tracker, "set_bot", lambda estado, **kw: estados.append((estado, kw)))
+
+    respostas = [
+        {"username": "LogosBot"},                       # getMe
+        None,                                           # publicar_menu
+        TelegramError("getUpdates: Read timed out", timeout=True),
+        TelegramError("getUpdates: Read timed out", timeout=True),
+        TelegramError("getUpdates: Read timed out", timeout=True),
+    ]
+    stop = threading.Event()
+    esperas = []
+
+    def fake_call(token, method, **kwargs):
+        resposta = respostas.pop(0) if respostas else stop.set() or []
+        if isinstance(resposta, TelegramError):
+            raise resposta
+        return resposta if resposta is not None else {}
+
+    monkeypatch.setattr(stop, "wait", lambda s: esperas.append(s))
+    with patch.object(telegram, "call", side_effect=fake_call):
+        Bot(TOKEN).run_polling(stop)
+
+    assert esperas == [], f"não deveria esperar entre polls: {esperas}"
+    assert all(estado == "polling" for estado, _ in estados), estados
+    assert all(kw.get("last_error") is None for _, kw in estados)
+
+
+def test_erro_de_verdade_continua_com_backoff(owner, monkeypatch):
+    from logos import status
+
+    monkeypatch.setattr(status.tracker, "set_bot", lambda estado, **kw: None)
+    respostas = [
+        {"username": "LogosBot"},
+        None,
+        TelegramError("getUpdates: 500 Internal Server Error", code=500),
+        TelegramError("getUpdates: 500 Internal Server Error", code=500),
+    ]
+    stop = threading.Event()
+    esperas = []
+
+    def fake_call(token, method, **kwargs):
+        resposta = respostas.pop(0) if respostas else stop.set() or []
+        if isinstance(resposta, TelegramError):
+            raise resposta
+        return resposta if resposta is not None else {}
+
+    monkeypatch.setattr(stop, "wait", lambda s: esperas.append(s))
+    with patch.object(telegram, "call", side_effect=fake_call):
+        Bot(TOKEN).run_polling(stop)
+
+    assert esperas == [1, 2], esperas
+
+
+def test_download_tenta_de_novo_antes_de_desistir(owner, tmp_path, monkeypatch):
+    """Uma conexão derrubada no meio não pode custar a nota de voz inteira."""
+    monkeypatch.setattr(telegram.time, "sleep", lambda s: None)
+    tentativas = []
+
+    class FakeResp:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def __enter__(self):
+            if not self.ok:
+                raise requests.ConnectionError("Connection broken")
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, n):
+            yield b"audio"
+
+    def fake_get(url, **kwargs):
+        tentativas.append(url)
+        return FakeResp(len(tentativas) >= 3)
+
+    destino = tmp_path / "98.oga"
+    with patch.object(telegram, "call", return_value={"file_path": "voice/98.oga"}):
+        with patch.object(telegram.requests, "get", side_effect=fake_get):
+            telegram.download_file(TOKEN, "f-98", destino)
+
+    assert len(tentativas) == 3
+    assert destino.read_bytes() == b"audio"
+
+
+def test_download_desiste_depois_do_limite(owner, tmp_path, monkeypatch):
+    monkeypatch.setattr(telegram.time, "sleep", lambda s: None)
+
+    def sempre_falha(url, **kwargs):
+        raise requests.ConnectionError("Connection broken")
+
+    with patch.object(telegram, "call", return_value={"file_path": "voice/98.oga"}):
+        with patch.object(telegram.requests, "get", side_effect=sempre_falha):
+            with pytest.raises(TelegramError):
+                telegram.download_file(TOKEN, "f-98", tmp_path / "98.oga")
+    # Nem o destino nem o temporário ficam para trás.
+    assert not (tmp_path / "98.oga").exists()
+    assert not any(f.name.startswith(".98.oga") for f in tmp_path.iterdir())
+
+
+def test_timeout_marca_a_excecao(owner):
+    with patch.object(telegram.requests, "post", side_effect=requests.Timeout("Read timed out")):
+        with pytest.raises(TelegramError) as erro:
+            telegram.call(TOKEN, "getUpdates")
+    assert erro.value.timeout is True

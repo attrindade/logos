@@ -123,9 +123,12 @@ def _ajuda() -> str:
 
 
 class TelegramError(Exception):
-    def __init__(self, message: str, code: int | None = None):
+    def __init__(self, message: str, code: int | None = None, timeout: bool = False):
         super().__init__(message)
         self.code = code
+        # `timeout` separa "a conexão não respondeu a tempo" de "a API recusou". No long poll do
+        # getUpdates o primeiro é rotina, não falha: ver o laço em run_polling.
+        self.timeout = timeout
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +187,8 @@ def call(token: str, method: str, *, http_timeout: float = 15, files: dict | Non
             resp = requests.post(url, data=params, files=files, timeout=http_timeout)
         else:
             resp = requests.post(url, json=params, timeout=http_timeout)
+    except requests.Timeout as e:
+        raise TelegramError(f"{method}: {_redact(str(e), token)}", timeout=True) from None
     except requests.RequestException as e:
         raise TelegramError(f"{method}: {_redact(str(e), token)}") from None
     try:
@@ -196,20 +201,34 @@ def call(token: str, method: str, *, http_timeout: float = 15, files: dict | Non
     return payload["result"]
 
 
+DOWNLOAD_TENTATIVAS = 3
+
+
 def download_file(token: str, file_id: str, dest: Path) -> None:
+    """Baixa o anexo, com nova tentativa.
+
+    Sem isso, uma conexão derrubada no meio do download custa a mensagem inteira: o `_add`
+    levanta, a sessão fica vazia e é descartada, e o dono só recebe "reenvie, por favor".
+    Aconteceu em 22/09/2026 com uma nota de voz. Um áudio de 2 MB numa rede instável merece
+    três tentativas antes de virar pedido de reenvio."""
     info = call(token, "getFile", file_id=file_id)
     url = f"{API}/file/bot{token}/{info['file_path']}"
     tmp = dest.with_name(f".{dest.name}.tmp")
-    try:
-        with requests.get(url, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            with open(tmp, "wb") as f:
-                for chunk in resp.iter_content(1 << 16):
-                    f.write(chunk)
-    except requests.RequestException as e:
-        tmp.unlink(missing_ok=True)
-        raise TelegramError(f"download: {_redact(str(e), token)}") from None
-    os.replace(tmp, dest)
+    for tentativa in range(1, DOWNLOAD_TENTATIVAS + 1):
+        try:
+            with requests.get(url, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in resp.iter_content(1 << 16):
+                        f.write(chunk)
+            os.replace(tmp, dest)
+            return
+        except requests.RequestException as e:
+            tmp.unlink(missing_ok=True)
+            if tentativa == DOWNLOAD_TENTATIVAS:
+                raise TelegramError(f"download: {_redact(str(e), token)}") from None
+            logger.warning(f"Telegram: download falhou ({tentativa}/{DOWNLOAD_TENTATIVAS}), tentando de novo.")
+            time.sleep(tentativa)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +666,22 @@ class Bot:
                     last_poll=datetime.now().isoformat(), last_error=None,
                 )
             except TelegramError as e:
+                if e.timeout and username is not None:
+                    # Long poll que expirou é rotina: o getUpdates fica pendurado por
+                    # POLL_TIMEOUT_S de propósito, e a rede desta máquina o derruba com
+                    # frequência. Tratar isso como falha dobrava a espera a cada oscilação
+                    # (1, 2, 4, ... até 60 s), e o bot passava mais tempo dormindo do que
+                    # ouvindo — foi por isso que ele demorou a responder em 22/09/2026.
+                    # Não há risco de laço apertado: cada tentativa já custa POLL_TIMEOUT_S.
+                    backoff = 1
+                    self.expire_if_idle()
+                    tracker.set_bot(
+                        "polling", username=username,
+                        owner_registered=get_owner_chat_id() is not None,
+                        session=self.session.name if self.session else None,
+                        last_poll=datetime.now().isoformat(), last_error=None,
+                    )
+                    continue
                 if e.code == 401:
                     logger.error("Telegram: token recusado (401). Bot desligado até corrigir o secrets.yaml e relançar.")
                     tracker.set_bot("error", username=username, last_error="token recusado (401)")
