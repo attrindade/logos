@@ -505,6 +505,87 @@ def test_check(owner, api, capsys):
     assert "@LogosBot" in capsys.readouterr().out
 
 
+# ---------------------------------------------------------------------------
+# Consulta (/ver, /buscar, /hoje): despacho, formato e o que ela não pode fazer
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def vault_falso(tmp_path, monkeypatch):
+    from logos import consulta
+
+    raiz = tmp_path / "vault"
+    (raiz / "work/active").mkdir(parents=True)
+    (raiz / "work/active/PPJ.md").write_text(
+        "---\nstatus: active\n---\n\n# PPJ\n\nReunião com <Bruna> & equipe.\n", encoding="utf-8",
+    )
+    (raiz / "capturas/Diario").mkdir(parents=True)
+    (raiz / "capturas/Diario/d.md").write_text("# Diário\n\nSENTINELA.\n", encoding="utf-8")
+    monkeypatch.setattr(config, "VAULT_DIR", raiz)
+    return consulta
+
+
+def test_ver_responde_em_html_sem_abrir_sessao(owner, api, vault_falso):
+    """Consultar não é capturar: nada vai para a Inbox e nenhuma sessão nasce."""
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("/ver"))
+    assert bot.session is None
+    assert list(config.INBOX_DIR.iterdir()) == []
+    [chamada] = api.call_args_list
+    assert chamada.args[1] == "sendMessage"
+    assert chamada.kwargs["parse_mode"] == "HTML"
+    assert "PPJ" in chamada.kwargs["text"]
+
+
+def test_consulta_escapa_o_conteudo_do_vault(owner, api, vault_falso):
+    Bot(TOKEN).handle_update(_update("/ver ppj"))
+    texto = api.call_args_list[0].kwargs["text"]
+    assert "&lt;Bruna&gt; &amp; equipe" in texto
+
+
+def test_consulta_nunca_alcanca_o_diario(owner, api, vault_falso):
+    """O termo digitado volta no eco; o que não pode voltar é o arquivo, o caminho ou o texto."""
+    Bot(TOKEN).handle_update(_update("/buscar SENTINELA"))
+    texto = api.call_args_list[0].kwargs["text"]
+    assert texto.startswith("Nada com")
+    assert "Diario" not in texto and "d.md" not in texto
+
+
+def test_erro_de_consulta_vira_resposta_em_texto(owner, api, vault_falso):
+    """ConsultaError é recado para o dono, não exceção que derruba o polling."""
+    Bot(TOKEN).handle_update(_update("/ver ppj 99"))
+    [chamada] = api.call_args_list
+    assert "parse_mode" not in chamada.kwargs
+    assert "seções" in chamada.kwargs["text"]
+
+
+def test_falha_inesperada_da_consulta_nao_derruba_o_bot(owner, api, vault_falso, monkeypatch):
+    monkeypatch.setattr(vault_falso, "projetos", MagicMock(side_effect=OSError("disco")))
+    Bot(TOKEN).handle_update(_update("/ver"))
+    assert "não consegui ler o vault" in api.call_args_list[0].kwargs["text"].lower()
+
+
+def test_html_recusado_reenvia_sem_formatacao(owner, api, vault_falso):
+    api.side_effect = [TelegramError("sendMessage: 400 Bad Request", code=400), {}]
+    Bot(TOKEN).handle_update(_update("/ver"))
+    segunda = api.call_args_list[1]
+    assert "parse_mode" not in segunda.kwargs
+    assert "<b>" not in segunda.kwargs["text"]
+
+
+def test_ajuda_anuncia_os_comandos_de_consulta(owner, api):
+    Bot(TOKEN).handle_update(_update("/ajuda"))
+    texto = api.call_args_list[0].kwargs["text"]
+    assert "/ver" in texto and "/buscar" in texto and "/hoje" in texto
+
+
+def test_acks_de_captura_nao_tem_emoji(owner, api, downloads):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("uma ideia solta"))
+    texto = api.call_args_list[0].kwargs["text"]
+    assert texto.startswith("Texto ")
+    assert not any(ord(c) > 0x2500 for c in texto), texto
+
+
 def test_cli_nao_importa_status_nem_toca_no_status_json(tmp_path):
     """`send` roda com o watcher vivo: importar logos.status regravaria o status.json dele."""
     repo = Path(__file__).resolve().parent.parent

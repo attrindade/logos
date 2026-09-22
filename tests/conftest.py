@@ -13,6 +13,10 @@ _TEST_ROOT = Path(tempfile.mkdtemp(prefix="logos-tests-"))
 os.environ["LOGOS_DATA_ROOT"] = str(_TEST_ROOT)
 os.environ["LOGOS_INBOX_DIR"] = str(_TEST_ROOT / "Inbox")
 os.environ["LOGOS_NOTES_DIR"] = str(_TEST_ROOT / "Notes")
+# A consulta do bot lê o vault a partir daqui. Sem isto, a suíte herdaria o vault_dir do
+# logos_config.yaml e /buscar rodaria contra as notas reais — inclusive as que a allowlist
+# existe para manter fora.
+os.environ["LOGOS_VAULT_DIR"] = str(_TEST_ROOT / "vault")
 # Vazio = nenhuma pasta extra. Sem isto a suíte herdaria o extra_inbox_dirs do
 # logos_config.yaml e varreria a pasta real do Google Drive do dono.
 os.environ["LOGOS_EXTRA_INBOX_DIRS"] = ""

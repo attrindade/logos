@@ -114,8 +114,12 @@ AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
 # Mensagens com menos que isso entre si formam um pacote (uma nota).
 TELEGRAM_WINDOW_MIN = float(os.getenv("LOGOS_TELEGRAM_WINDOW_MIN") or _user_cfg.get("telegram_window_min", 10))
 
-# Raiz do vault, para embeds com caminho completo. Padrão: pasta-mãe de notes_dir.
-_raw_vault_dir = os.getenv("LOGOS_VAULT_DIR") or _user_cfg.get("vault_dir")
+# Raiz do vault: embeds com caminho completo (writer) e base da allowlist de pastas que o
+# bot pode ler (consulta). Padrão: pasta-mãe de notes_dir.
+# `is not None` pelo mesmo motivo de EXTRA_INBOX_DIRS: a variável definida como vazia precisa
+# significar "sem vault", senão a suíte cairia de volta no yaml e leria o vault de verdade.
+_env_vault_dir = os.getenv("LOGOS_VAULT_DIR")
+_raw_vault_dir = _env_vault_dir if _env_vault_dir is not None else _user_cfg.get("vault_dir")
 VAULT_DIR = Path(_raw_vault_dir).expanduser().resolve() if _raw_vault_dir else None
 
 

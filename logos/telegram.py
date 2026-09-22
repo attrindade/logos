@@ -43,7 +43,7 @@ from pathlib import Path
 import requests
 import yaml
 
-from . import config
+from . import config, consulta
 from .triage import TELEGRAM_TAG, _normalize_word
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,8 @@ EXIT_OK, EXIT_FAILED, EXIT_NOT_CONFIGURED = 0, 1, 2
 
 # comando -> primeira palavra que a triagem entende
 PREFIX_COMMANDS = {"tarefa": "tarefa", "ideia": "ideia", "planejamento": "planejamento", "diario": "diário"}
+# Comandos de leitura do vault. Somente leitura: não abrem, não alimentam e não fecham sessão.
+CONSULTA_COMMANDS = ("ver", "buscar", "hoje")
 KIND_LABELS = {
     "texto": "texto", "voz": "voz", "audio": "áudio", "foto": "foto",
     "documento": "documento", "localizacao": "localização",
@@ -81,10 +83,15 @@ def _fmt_min(value: float) -> str:
 
 def _ajuda() -> str:
     return (
+        "Capturar\n"
         "Mande texto, voz, foto, PDF, documento, link ou localização. Mensagens com até "
         f"{_fmt_min(config.TELEGRAM_WINDOW_MIN)} min de intervalo viram uma nota só.\n"
         "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
-        "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela."
+        "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela.\n"
+        "\n"
+        "Consultar\n"
+        "/ver lista os projetos ativos · /ver <nome> abre um · /ver <nome> <n> abre uma seção\n"
+        "/buscar <termo> procura nas notas · /hoje mostra o briefing mais recente"
     )
 
 
@@ -308,6 +315,36 @@ class Bot:
         except TelegramError as e:
             logger.warning(f"Telegram: falha ao responder: {e}")
 
+    def reply_html(self, message: dict, text: str) -> None:
+        """Resposta formatada da consulta, quebrada em mensagens por linha inteira.
+
+        `parse_mode` vive só aqui: `send()` e `notify()` mandam texto puro (briefing, avisos de
+        job) com `<` e `&` sem escapar, e ligar HTML neles devolveria 400. Se ainda assim a API
+        recusar a formatação, reenvia sem tags: consulta entregue feia é melhor que não entregue.
+        """
+        for indice, parte in enumerate(consulta.partir(text)):
+            params = {
+                "chat_id": message["chat"]["id"],
+                "text": parte,
+                "parse_mode": "HTML",
+                "link_preview_options": {"is_disabled": True},
+            }
+            if indice == 0:
+                params["reply_parameters"] = {
+                    "message_id": message["message_id"], "allow_sending_without_reply": True,
+                }
+            try:
+                call(self.token, "sendMessage", **params)
+            except TelegramError as e:
+                logger.warning(f"Telegram: HTML recusado ({e}); reenviando sem formatação.")
+                params.pop("parse_mode")
+                params["text"] = consulta.sem_tags(parte)
+                try:
+                    call(self.token, "sendMessage", **params)
+                except TelegramError as e2:
+                    logger.warning(f"Telegram: falha ao responder consulta: {e2}")
+                    return
+
     def handle_update(self, update: dict) -> None:
         message = update.get("message")
         if not message:
@@ -336,11 +373,13 @@ class Bot:
                 self._capture(message)
         except Exception:
             logger.exception(f"Telegram: falha ao capturar a mensagem {message.get('message_id')}")
-            self.reply(message, "⚠️ Não consegui salvar esta mensagem. Reenvie, por favor.")
+            self.reply(message, "Não consegui salvar esta mensagem. Reenvie, por favor.")
 
     def _handle_command(self, message: dict, command: str, rest: str) -> None:
         if command == "start":
             self.reply(message, "Logos já está conectado a este chat.\n\n" + _ajuda())
+        elif command in CONSULTA_COMMANDS:
+            self._consultar(message, command, rest)
         elif command in PREFIX_COMMANDS:
             if not rest:
                 self.reply(message, f"Uso: /{command} <texto>")
@@ -355,9 +394,27 @@ class Bot:
             if size == 0:
                 self.reply(message, "Sessão vazia descartada.")
             else:
-                self.reply(message, f"✅ Sessão fechada com {size} mensagem(ns): {name}. A nota sai em seguida.")
+                self.reply(message, f"Sessão fechada com {size} mensagem(ns): {name}. A nota sai em seguida.")
         else:
             self.reply(message, _ajuda())
+
+    def _consultar(self, message: dict, command: str, rest: str) -> None:
+        """Leitura do vault. Não toca a sessão de captura aberta: perguntar não é capturar."""
+        try:
+            if command == "ver":
+                texto = consulta.cmd_ver(rest)
+            elif command == "buscar":
+                texto = consulta.cmd_buscar(rest)
+            else:
+                texto = consulta.cmd_hoje()
+        except consulta.ConsultaError as e:
+            self.reply(message, str(e))
+            return
+        except Exception:
+            logger.exception(f"Telegram: falha na consulta /{command}")
+            self.reply(message, "Não consegui ler o vault agora. O log do Logos tem o motivo.")
+            return
+        self.reply_html(message, texto)
 
     @staticmethod
     def _classify(message: dict, text: str) -> tuple[str | None, dict | None, str]:
@@ -400,7 +457,7 @@ class Bot:
             session = self._open(message, reply_to=reply_to)
             self._add(session, message, kind, media, ext, text)
             self._close(session, "resposta")
-            self.reply(message, f"📎 {label} registrado como resposta ({session.name}). Complementa a nota da mensagem original." + aviso)
+            self.reply(message, f"{label.capitalize()} registrado como resposta ({session.name}). Complementa a nota da mensagem original." + aviso)
             return
 
         opened = self.session is None
@@ -409,11 +466,11 @@ class Bot:
         self._add(self.session, message, kind, media, ext, text)
         if opened:
             ack = (
-                f"📥 {label} · sessão aberta ({self.session.name}). "
+                f"{label.capitalize()} · sessão aberta ({self.session.name}). "
                 f"Fecha após {_fmt_min(config.TELEGRAM_WINDOW_MIN)} min sem mensagens ou com /nova."
             )
         else:
-            ack = f"📥 {label} · {self.session.size} na sessão"
+            ack = f"{label.capitalize()} · {self.session.size} na sessão"
         self.reply(message, ack + aviso)
 
     def _open(self, message: dict, reply_to: int | None = None) -> Session:

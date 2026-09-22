@@ -97,6 +97,22 @@ Capturas de Diário mandadas pelo Telegram passam pela nuvem do Telegram; o bot 
 
 Quando a Inbox é uma pasta receive-only do Syncthing, acrescente `* tg*` ao `Inbox/.stignore`: sem isso, os arquivos do bot aparecem como alterações locais, e "Revert local changes" os apaga.
 
+### Consultar o vault pelo chat
+
+O mesmo bot lê o vault, sem LLM e sem escrever nada:
+
+| Comando | O que faz |
+| :--- | :--- |
+| `/ver` | lista os projetos ativos, do mexido mais recentemente para o mais antigo |
+| `/ver <nome>` | abre a nota; se for longa, devolve o índice de seções |
+| `/ver <nome> <n>` | abre a seção `n` daquela nota |
+| `/buscar <termo>` | linhas que casam, agrupadas por arquivo (sem acento e sem caixa) |
+| `/hoje` | o briefing mais recente de `briefings/` |
+
+A saída vai em HTML da Bot API, com o Markdown do vault reduzido a texto legível: wikilink vira o alias, pictograma sai, separador de tabela some, frontmatter fica fora da busca. `send()` e `notify()` seguem em texto puro — ligar HTML neles quebraria o briefing, que manda `<` e `&` sem escapar.
+
+**As pastas legíveis são uma allowlist** em `consulta.ALLOWED_SUBDIRS` (`work/active`, `brain`, `org`, `briefings`, `capturas/Inbox`, `capturas/Planejamento`), relativa a `vault_dir`. `capturas/Diario/` e tudo o mais ficam de fora por construção: uma pasta nova no vault nasce invisível para o bot. Alterar essa tupla é alterar o que o Telegram pode ver — `tests/test_consulta.py::test_diario_nunca_aparece` existe para essa mudança não passar despercebida.
+
 ### Envio a partir de scripts
 
 ```bash
@@ -137,6 +153,7 @@ logos/
 ├── lock.py               # Lock de instância única
 ├── status.py             # Status do pipeline em tempo real (state/status.json)
 ├── telegram.py           # Bot Telegram (pacotes) e CLI send/check
+├── consulta.py           # Leitura do vault pelo chat (/ver, /buscar, /hoje)
 ├── extractors.py         # OCR, visão, PDF, .docx e links dos anexos
 ├── aw.py                 # Evento no ActivityWatch por captura
 └── prompts/              # Prompts por rota (Diario, Planejamento, Inbox)
