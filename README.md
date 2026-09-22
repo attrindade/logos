@@ -102,6 +102,22 @@ Diário captures sent through Telegram go through Telegram's cloud; the bot remi
 
 Add `* tg*` to `Inbox/.stignore` when the Inbox is a Syncthing receive-only folder: otherwise bot files show up as local changes, and "Revert local changes" deletes them.
 
+### Querying the vault from the chat
+
+The same bot reads the vault, with no LLM and without writing anything:
+
+| Command | What it does |
+| :--- | :--- |
+| `/ver` | lists active projects, most recently touched first |
+| `/ver <name>` | opens the note; long ones come back as a section index |
+| `/ver <name> <n>` | opens section `n` of that note |
+| `/buscar <term>` | matching lines grouped by file (accent- and case-insensitive) |
+| `/hoje` | the most recent briefing in `briefings/` |
+
+Output goes out as Bot API HTML, with the vault's Markdown reduced to readable text: wikilinks become their alias, pictographs are dropped, table separators disappear, frontmatter stays out of search results. `send()` and `notify()` remain plain text — turning HTML on for them would break the briefing, which sends `<` and `&` unescaped.
+
+**Readable folders are an allowlist** in `consulta.ALLOWED_SUBDIRS` (`work/active`, `brain`, `org`, `briefings`, `capturas/Inbox`, `capturas/Planejamento`), relative to `vault_dir`. `capturas/Diario/` and everything else stay out by construction: a new folder in the vault is born invisible to the bot. Changing that tuple changes what Telegram can see — `tests/test_consulta.py::test_diario_nunca_aparece` exists so the change cannot pass unnoticed.
+
 ### Sending from scripts
 
 ```bash
@@ -142,6 +158,7 @@ logos/
 ├── lock.py               # Single-instance lock file
 ├── status.py             # Live pipeline status (state/status.json)
 ├── telegram.py           # Telegram bot (bundles) and send/check CLI
+├── consulta.py           # Vault reads from the chat (/ver, /buscar, /hoje)
 ├── extractors.py         # OCR, vision, PDF, .docx and link text for attachments
 ├── aw.py                 # ActivityWatch event per capture
 └── prompts/              # Route prompt templates (diario.txt, planejamento.txt, inbox.txt)
