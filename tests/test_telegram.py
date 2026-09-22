@@ -827,3 +827,28 @@ def test_maratona_de_timeouts_deixa_rastro_no_log(owner, monkeypatch, caplog):
 
     avisos = [r for r in caplog.records if "timeouts seguidos" in r.message]
     assert len(avisos) == 1, [r.message for r in caplog.records]
+
+
+def test_timeout_na_subida_nao_recua_exponencialmente(owner, monkeypatch):
+    """getMe que expira também não pode dobrar a espera: a espera já foi paga pelo timeout,
+    e dobrá-la deixava o bot minutos fora do ar depois de um relançamento."""
+    from logos import status
+
+    monkeypatch.setattr(status.tracker, "set_bot", lambda estado, **kw: None)
+    respostas = [TelegramError("getMe: Read timed out", timeout=True)] * 4 + [
+        {"username": "LogosBot"}, None,
+    ]
+    stop = threading.Event()
+    esperas = []
+
+    def fake_call(token, method, **kwargs):
+        resposta = respostas.pop(0) if respostas else stop.set() or []
+        if isinstance(resposta, TelegramError):
+            raise resposta
+        return resposta if resposta is not None else {}
+
+    monkeypatch.setattr(stop, "wait", lambda s: esperas.append(s))
+    with patch.object(telegram, "call", side_effect=fake_call):
+        Bot(TOKEN).run_polling(stop)
+
+    assert esperas == [telegram.TIMEOUT_RETENTATIVA_S] * 4, esperas

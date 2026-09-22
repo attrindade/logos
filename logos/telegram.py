@@ -56,6 +56,9 @@ MAX_BACKOFF_S = 60
 # queda de rede prolongada, que é o tipo de falha silenciosa que já custou caro aqui. A cada
 # tanto de timeouts seguidos sai uma linha, para a ausência de mensagens ter explicação.
 TIMEOUTS_ATE_AVISAR = 10
+# Espera depois de um timeout, em qualquer fase. Curta de propósito: o tempo de espera já foi
+# pago pelo próprio timeout, e recuar mais só adia a volta numa rede que oscila.
+TIMEOUT_RETENTATIVA_S = 1
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # limite de download da Bot API
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
@@ -700,13 +703,22 @@ class Bot:
                     logger.error("Telegram: token recusado (401). Bot desligado até corrigir o secrets.yaml e relançar.")
                     tracker.set_bot("error", username=username, last_error="token recusado (401)")
                     return
+                if e.timeout:
+                    # Timeout na conexão (o getMe da subida). Recuar exponencialmente aqui era o
+                    # mesmo erro do long poll com outra roupa: a espera já foi paga pelo próprio
+                    # timeout, então dobrá-la só atrasa a subida. Em 22/09/2026 isso deixou o bot
+                    # dois minutos fora do ar depois de um relançamento, numa rede em que a
+                    # quarta tentativa seguida costuma passar.
+                    espera = TIMEOUT_RETENTATIVA_S
+                else:
+                    espera = backoff
+                    backoff = min(backoff * 2, MAX_BACKOFF_S)
                 if e.code == 409:
                     logger.error("Telegram: conflito 409, outro processo lê getUpdates com este token.")
                 else:
-                    logger.warning(f"Telegram: {e}. Nova tentativa em {backoff}s.")
+                    logger.warning(f"Telegram: {e}. Nova tentativa em {espera}s.")
                 tracker.set_bot("error", username=username, last_error=str(e))
-                stop.wait(backoff)
-                backoff = min(backoff * 2, MAX_BACKOFF_S)
+                stop.wait(espera)
             except Exception as e:
                 logger.exception("Telegram: erro inesperado no polling")
                 tracker.set_bot("error", username=username, last_error=str(e))
