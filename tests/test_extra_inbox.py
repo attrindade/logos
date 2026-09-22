@@ -198,3 +198,36 @@ def test_arquivo_que_some_durante_a_estabilizacao_devolve_o_status(monkeypatch, 
 
     assert watcher._wait_for_stable_file(sumido) is False
     assert chamou_idle, "o tracker precisa voltar para ocioso quando o arquivo some"
+
+
+def test_pasta_que_aparece_depois_entra_na_observacao(monkeypatch, tmp_path):
+    """Drive montado depois do boot: o watcher sobe sem ela e a inscreve na varredura."""
+    from logos import watcher
+
+    inbox = tmp_path / "Inbox"
+    inbox.mkdir()
+    atrasada = tmp_path / "G_monta_depois"
+    monkeypatch.setattr(config, "INBOX_DIR", inbox)
+    monkeypatch.setattr(config, "EXTRA_INBOX_DIRS", [atrasada])
+
+    agendadas = []
+
+    class FalsoObserver:
+        def schedule(self, handler, caminho, recursive=False):
+            agendadas.append(Path(caminho))
+
+    observer = FalsoObserver()
+    observadas = [inbox]
+
+    # Ainda não montada: nada muda.
+    watcher._subscribe_pending(observer, object(), observadas)
+    assert agendadas == []
+
+    atrasada.mkdir()
+    watcher._subscribe_pending(observer, object(), observadas)
+    assert agendadas == [atrasada]
+    assert observadas == [inbox, atrasada]
+
+    # Já inscrita: não duplica na varredura seguinte.
+    watcher._subscribe_pending(observer, object(), observadas)
+    assert agendadas == [atrasada]
