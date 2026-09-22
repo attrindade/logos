@@ -21,6 +21,11 @@ _NAME_RE = re.compile(
 
 TEXT_EXTENSIONS = {".txt", ".md"}
 
+# Só usado nas pastas extras (Drive): lá convivem audiobook, PDF, zip e atalhos .gdoc, e o
+# Whisper mastigaria tudo. Na Inbox própria segue valendo o filtro largo do is_ignored, porque
+# só o gravador e o bot escrevem nela.
+AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".aac", ".flac", ".mp4", ".m4b", ".wma"}
+
 # Primeira palavra que mantém a rota Inbox mas fixa a categoria por regra, sem depender da LLM.
 _CATEGORIAS = {
     "tarefa": "tarefa", "tarefas": "tarefa",
@@ -44,6 +49,10 @@ class Triage:
 
 def is_text_file(filename) -> bool:
     return Path(str(filename)).suffix.lower() in TEXT_EXTENSIONS
+
+
+def is_audio_file(filename) -> bool:
+    return Path(str(filename)).suffix.lower() in AUDIO_EXTENSIONS
 
 
 # Temporários que o Syncthing cria enquanto ainda escreve o arquivo final. Passavam pelo

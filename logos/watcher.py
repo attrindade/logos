@@ -18,12 +18,18 @@ from .ledger import Entry, Ledger, State
 from .pipeline import process_bundle, process_file, read_manifest, retry_failed
 from .status import PipelineStage, tracker
 from .telegram import start_bot_thread
-from .triage import is_bundle_name, is_ignored, is_text_file
+from .triage import is_audio_file, is_bundle_name, is_ignored, is_text_file
 
 logger = logging.getLogger(__name__)
 
 TEXT_STABILITY_INTERVAL_S = 1
 BUNDLE_READY_TIMEOUT_S = 30
+
+# Rede de segurança para as pastas extras: o Drive File Stream é um sistema de arquivos virtual
+# e nada garante que todo evento chegue (nem que a unidade esteja montada na hora em que o
+# watcher sobe). A varredura é barata — o ledger descarta o que já foi processado — e é o que
+# transforma "perdeu o evento" em "atrasou 10 minutos" em vez de "sumiu em silêncio".
+RESCAN_INTERVAL_MIN = 10
 
 
 def _set_low_priority():
@@ -56,7 +62,11 @@ def _wait_for_stable_file(path: Path) -> bool:
     while True:
         try:
             size = path.stat().st_size
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
+            # O arquivo sumiu em voo (movido, substituído pela sincronização, ou a unidade do
+            # Drive saiu do ar). Sem devolver o tracker para ocioso, o status fica preso em
+            # "estabilizando" para sempre e o DevPortal mostra um trabalho que não existe.
+            tracker.set_idle()
             return False
         if size == last_size:
             stable_reads += 1
@@ -79,6 +89,7 @@ def _wait_for_stable_file(path: Path) -> bool:
         with open(path, "rb"):
             pass
     except OSError:
+        tracker.set_idle()
         return False
     return True
 
@@ -116,25 +127,69 @@ def expire_archive(ledger: Ledger) -> None:
         ledger.upsert(entry)
 
 
+def is_watched_dir(directory: Path) -> bool:
+    return directory in config.inbox_dirs()
+
+
+def _subscribe_pending(observer, handler, observadas: list[Path]) -> None:
+    """Inscreve pasta observada que ainda não existia quando o watcher subiu — o caso é o
+    Drive montar depois do boot."""
+    for directory in config.inbox_dirs():
+        if directory in observadas:
+            continue
+        try:
+            if not directory.exists():
+                continue
+        except OSError:
+            continue
+        observer.schedule(handler, str(directory), recursive=False)
+        observadas.append(directory)
+        logger.info(f"Pasta apareceu e entrou na observação: {directory}")
+
+
+def accepts(directory: Path, filename: str) -> bool:
+    """Numa pasta extra (Drive) só áudio entra; ali convivem PDF, zip, audiobook e atalhos
+    .gdoc. Na Inbox própria segue tudo, porque só o gravador e o bot escrevem nela."""
+    if is_ignored(filename):
+        return False
+    if directory == config.INBOX_DIR:
+        return True
+    return is_audio_file(filename)
+
+
 def scan_inbox(ledger: Ledger) -> None:
-    """Varre a Inbox inteira — cobre arquivos e pacotes que chegaram enquanto o watcher estava
-    parado, e retoma qualquer TRANSCRIBED pendente de enriquecimento."""
-    if not config.INBOX_DIR.exists():
+    """Varre as pastas observadas — cobre arquivos e pacotes que chegaram enquanto o watcher
+    estava parado, e retoma qualquer TRANSCRIBED pendente de enriquecimento."""
+    for directory in config.inbox_dirs():
+        if not directory.exists():
+            if directory != config.INBOX_DIR:
+                logger.warning(f"Pasta extra indisponível, pulando nesta varredura: {directory}")
+            continue
+        _scan_one(directory, ledger)
+
+
+def _scan_one(directory: Path, ledger: Ledger) -> None:
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError as e:
+        # Unidade do Drive pode sumir no meio da varredura; não derruba o watcher.
+        logger.warning(f"Falha ao listar {directory}: {e}")
         return
 
-    for path in sorted(config.INBOX_DIR.iterdir()):
+    for path in entries:
         if is_ignored(path.name):
             continue
         if path.is_dir():
-            if is_bundle_name(path.name) and _wait_for_bundle(path):
+            # Pacote (foto+legenda) só existe na Inbox própria: quem os monta é o bot.
+            if directory == config.INBOX_DIR and is_bundle_name(path.name) and _wait_for_bundle(path):
                 process_bundle(path, ledger)
                 tracker.set_idle()
             continue
-        if not path.is_file():
+        if not path.is_file() or not accepts(directory, path.name):
             continue
         try:
             size = path.stat().st_size
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             continue
         if ledger.is_processed(path.name, size):
             continue
@@ -161,14 +216,16 @@ class _InboxHandler(FileSystemEventHandler):
 
     def _handle(self, event, path: Path | None = None):
         path = path or Path(event.src_path)
-        if path.parent != config.INBOX_DIR or is_ignored(path.name):
-            return  # renomeado para fora da Inbox, ou temporário/metadado
+        if not is_watched_dir(path.parent):
+            return  # renomeado para fora de uma pasta observada
         if event.is_directory:
             # No Windows, uma pasta renomeada para dentro da Inbox chega como DirCreatedEvent.
-            if is_bundle_name(path.name) and _wait_for_bundle(path):
+            if path.parent == config.INBOX_DIR and is_bundle_name(path.name) and _wait_for_bundle(path):
                 process_bundle(path, self.ledger)
                 tracker.set_idle()
             return
+        if not accepts(path.parent, path.name):
+            return  # temporário, metadado, ou não-áudio numa pasta extra
         if _wait_for_stable_file(path):
             process_file(path, self.ledger)
             tracker.set_idle()
@@ -200,19 +257,33 @@ def run():
     tracker.set_idle("Watcher ativo • Monitorando Inbox")
 
     observer = Observer()
-    observer.schedule(_InboxHandler(ledger), str(config.INBOX_DIR), recursive=False)
+    handler = _InboxHandler(ledger)
+    observadas = []
+    for directory in config.inbox_dirs():
+        if not directory.exists():
+            # Pasta extra some quando o Drive não está montado. A varredura periódica a
+            # reencontra e a inscreve depois; o que não pode é o watcher não subir por isso.
+            logger.warning(f"Pasta não encontrada, seguindo sem ela: {directory}")
+            continue
+        observer.schedule(handler, str(directory), recursive=False)
+        observadas.append(directory)
     observer.start()
-    logger.info(f"Observando {config.INBOX_DIR} ...")
+    logger.info("Observando: " + " | ".join(str(d) for d in observadas))
 
     # O bot só entrega arquivos e pacotes na Inbox; o observer acima os processa como qualquer chegada.
     stop_bot = threading.Event()
     start_bot_thread(stop_bot)
 
     last_daily_check = datetime.now()
+    last_rescan = datetime.now()
     try:
         while True:
             time.sleep(10)
             tracker.heartbeat()
+            if datetime.now() - last_rescan >= timedelta(minutes=RESCAN_INTERVAL_MIN):
+                _subscribe_pending(observer, handler, observadas)
+                scan_inbox(ledger)
+                last_rescan = datetime.now()
             if datetime.now() - last_daily_check >= timedelta(days=1):
                 expire_archive(ledger)
                 last_daily_check = datetime.now()

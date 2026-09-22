@@ -515,7 +515,14 @@ def retry_failed(ledger: Ledger) -> None:
         if ledger.is_superseded(entry):
             logger.debug(f"Ignorando falha obsoleta ({entry.size} bytes): {entry.filename}")
             continue
-        path = config.INBOX_DIR / entry.filename
-        if path.exists():
-            logger.info(f"Reprocessando arquivo que falhou antes: {entry.filename}")
-            process_path(path, ledger)
+        # O ledger guarda só o nome, não a pasta de origem: procura em todas as observadas.
+        for directory in config.inbox_dirs():
+            path = directory / entry.filename
+            try:
+                existe = path.exists()
+            except OSError:
+                continue  # unidade do Drive fora do ar
+            if existe:
+                logger.info(f"Reprocessando arquivo que falhou antes: {entry.filename}")
+                process_path(path, ledger)
+                break

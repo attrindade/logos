@@ -33,6 +33,32 @@ DATA_ROOT = Path(_raw_data_root).expanduser().resolve() if _raw_data_root else _
 _raw_inbox_dir = os.getenv("LOGOS_INBOX_DIR") or _user_cfg.get("inbox_dir")
 INBOX_DIR = Path(_raw_inbox_dir).expanduser().resolve() if _raw_inbox_dir else DATA_ROOT / "Inbox"
 
+# Pastas extras observadas além da Inbox própria. Caso de uso: a pasta do Google Drive onde o
+# gravador de entrevistas deposita — o Drive for Desktop a monta como caminho local (G:\...),
+# então não é conector nenhum, é só mais uma pasta.
+# INBOX_DIR continua sendo a Inbox canônica: é onde o bot do Telegram grava e a única que o
+# ensure_directories cria. As extras NUNCA são criadas — se o Drive não estiver montado, o
+# watcher avisa e segue, em vez de fabricar uma pasta órfã no lugar do ponto de montagem.
+# Nas extras só entra áudio (triage.AUDIO_EXTENSIONS): numa pasta do Drive convivem PDF, zip,
+# audiobook e atalhos .gdoc que não têm o que fazer no pipeline.
+# `is not None` e não truthiness: a variável definida como vazia precisa significar "nenhuma
+# pasta extra", e é assim que os testes se isolam da pasta real do Drive. Com truthiness, o
+# vazio cairia de volta no yaml e a suíte varreria o Drive de verdade.
+_raw_extra = os.getenv("LOGOS_EXTRA_INBOX_DIRS")
+if _raw_extra is not None:
+    _extra_list = [p for p in _raw_extra.split(os.pathsep) if p.strip()]
+else:
+    _extra_list = _user_cfg.get("extra_inbox_dirs") or []
+EXTRA_INBOX_DIRS = [Path(p).expanduser().resolve() for p in _extra_list]
+
+
+def inbox_dirs() -> list[Path]:
+    """Pastas observadas, a própria primeiro. É função e não constante de módulo de propósito:
+    os testes trocam INBOX_DIR em tempo de execução, e uma lista montada no import ficaria
+    apontando para a pasta antiga."""
+    return [INBOX_DIR, *(d for d in EXTRA_INBOX_DIRS if d != INBOX_DIR)]
+
+
 _raw_notes_dir = os.getenv("LOGOS_NOTES_DIR") or _user_cfg.get("notes_dir")
 NOTES_DIR = Path(_raw_notes_dir).expanduser().resolve() if _raw_notes_dir else DATA_ROOT / "Notes"
 
