@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 API = "https://api.telegram.org"
 POLL_TIMEOUT_S = 30
 MAX_BACKOFF_S = 60
+# Timeout de long poll é rotina e não vai para o log — mas silêncio absoluto esconderia uma
+# queda de rede prolongada, que é o tipo de falha silenciosa que já custou caro aqui. A cada
+# tanto de timeouts seguidos sai uma linha, para a ausência de mensagens ter explicação.
+TIMEOUTS_ATE_AVISAR = 10
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # limite de download da Bot API
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
@@ -645,6 +649,7 @@ class Bot:
         username = None
         offset = None
         backoff = 1
+        timeouts = 0
         while not stop.is_set():
             try:
                 if username is None:
@@ -655,7 +660,10 @@ class Bot:
                 if offset is not None:
                     params["offset"] = offset
                 updates = call(self.token, "getUpdates", http_timeout=POLL_TIMEOUT_S + 5, **params)
+                if timeouts:
+                    logger.info(f"Telegram: rede voltou depois de {timeouts} timeout(s) seguidos.")
                 backoff = 1
+                timeouts = 0
                 for update in updates:
                     offset = update["update_id"] + 1  # avança mesmo se falhar: não travar numa mensagem
                     self.handle_update(update)
@@ -674,6 +682,12 @@ class Bot:
                     # ouvindo — foi por isso que ele demorou a responder em 22/09/2026.
                     # Não há risco de laço apertado: cada tentativa já custa POLL_TIMEOUT_S.
                     backoff = 1
+                    timeouts += 1
+                    if timeouts % TIMEOUTS_ATE_AVISAR == 0:
+                        logger.warning(
+                            f"Telegram: {timeouts} timeouts seguidos no getUpdates. O bot segue "
+                            "tentando, mas a rede para api.telegram.org está ruim."
+                        )
                     self.expire_if_idle()
                     tracker.set_bot(
                         "polling", username=username,

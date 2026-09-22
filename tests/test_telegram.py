@@ -802,3 +802,28 @@ def test_timeout_marca_a_excecao(owner):
         with pytest.raises(TelegramError) as erro:
             telegram.call(TOKEN, "getUpdates")
     assert erro.value.timeout is True
+
+
+def test_maratona_de_timeouts_deixa_rastro_no_log(owner, monkeypatch, caplog):
+    """Timeout não vai para o log um a um, mas uma queda longa não pode ficar invisível."""
+    from logos import status
+
+    monkeypatch.setattr(status.tracker, "set_bot", lambda estado, **kw: None)
+    respostas = [{"username": "LogosBot"}, None] + [
+        TelegramError("getUpdates: Read timed out", timeout=True)
+    ] * telegram.TIMEOUTS_ATE_AVISAR
+    stop = threading.Event()
+
+    def fake_call(token, method, **kwargs):
+        resposta = respostas.pop(0) if respostas else stop.set() or []
+        if isinstance(resposta, TelegramError):
+            raise resposta
+        return resposta if resposta is not None else {}
+
+    monkeypatch.setattr(stop, "wait", lambda s: None)
+    with caplog.at_level(logging.WARNING):
+        with patch.object(telegram, "call", side_effect=fake_call):
+            Bot(TOKEN).run_polling(stop)
+
+    avisos = [r for r in caplog.records if "timeouts seguidos" in r.message]
+    assert len(avisos) == 1, [r.message for r in caplog.records]
