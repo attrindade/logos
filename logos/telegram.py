@@ -207,6 +207,39 @@ _sessao.mount("https://", requests.adapters.HTTPAdapter(
 ))
 
 
+def _expirou(e: Exception) -> bool:
+    """A leitura expirou? Nem sempre isso chega como `requests.Timeout`.
+
+    Com `Retry` montado no adapter, o urllib3 embrulha o read timeout num `MaxRetryError` e o
+    requests o re-levanta como `ConnectionError` — que **não** é `requests.Timeout`. O long poll
+    expirado caía então no ramo de falha de rede e recuava exponencialmente: 1, 2, 4... até 60 s
+    sem ouvir, que é o bot "surdo" depois de uma oscilação. Ver [[Gotchas]]: é a terceira vez que
+    este mesmo sintoma aparece, e as duas correções anteriores só pegaram o caso sem embrulho.
+
+    A classificação é pela cadeia de exceções, nunca pelo texto: a mensagem passa pelo `_redact`,
+    que recorta o token de dentro dela e desfigura o resto no caminho.
+    """
+    if isinstance(e, requests.Timeout):
+        return True
+    atual: BaseException | None = e
+    for _ in range(6):
+        if atual is None:
+            return False
+        # `ReadTimeoutError`, e não `urllib3.exceptions.TimeoutError`: o `NewConnectionError`
+        # (host inalcançável, conexão recusada) herda de `ConnectTimeoutError`, então o tipo
+        # guarda-chuva classificaria queda de rede como long poll expirado — e queda de rede
+        # DEVE recuar exponencialmente. Timeout de conexão de verdade continua coberto pelo
+        # `requests.Timeout` acima.
+        if isinstance(atual, urllib3.exceptions.ReadTimeoutError):
+            return True
+        prox = getattr(atual, "reason", None)
+        if not isinstance(prox, BaseException):
+            args = getattr(atual, "args", ())
+            prox = args[0] if args and isinstance(args[0], BaseException) else None
+        atual = prox
+    return False
+
+
 def call(token: str, method: str, *, http_timeout: float = 15, files: dict | None = None, **params):
     """Chama um método da Bot API. Erros nunca carregam o token (a URL o contém).
 
@@ -217,10 +250,8 @@ def call(token: str, method: str, *, http_timeout: float = 15, files: dict | Non
             resp = _sessao.post(url, data=params, files=files, timeout=http_timeout)
         else:
             resp = _sessao.post(url, json=params, timeout=http_timeout)
-    except requests.Timeout as e:
-        raise TelegramError(f"{method}: {_redact(str(e), token)}", timeout=True) from None
     except requests.RequestException as e:
-        raise TelegramError(f"{method}: {_redact(str(e), token)}") from None
+        raise TelegramError(f"{method}: {_redact(str(e), token)}", timeout=_expirou(e)) from None
     try:
         payload = resp.json()
     except ValueError:

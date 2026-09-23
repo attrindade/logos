@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+import urllib3
 
 from logos import config, telegram
 from logos.telegram import Bot, TelegramError
@@ -802,6 +803,39 @@ def test_timeout_marca_a_excecao(owner):
         with pytest.raises(TelegramError) as erro:
             telegram.call(TOKEN, "getUpdates")
     assert erro.value.timeout is True
+
+
+def test_timeout_embrulhado_pelo_retry_tambem_marca(owner):
+    """Read timeout que passou pelo `Retry` chega como `ConnectionError`, não como `Timeout`.
+
+    Era isto que fazia o long poll expirado recuar exponencialmente (1, 2, 4... 60 s) depois
+    das duas correções anteriores no recuo: elas só pegavam o `requests.Timeout` cru. O sinal
+    no log é o prefixo `Max retries exceeded ... Caused by ReadTimeoutError`.
+    """
+    embrulhado = requests.exceptions.ConnectionError(
+        urllib3.exceptions.MaxRetryError(
+            pool=None, url="/bot<token>/getUpdates",
+            reason=urllib3.exceptions.ReadTimeoutError(None, "/", "Read timed out. (read timeout=35)"),
+        )
+    )
+    with patch.object(telegram._sessao, "post", side_effect=embrulhado):
+        with pytest.raises(TelegramError) as erro:
+            telegram.call(TOKEN, "getUpdates", http_timeout=35)
+    assert erro.value.timeout is True
+
+
+def test_conexao_recusada_nao_e_timeout(owner):
+    """Contraprova: queda de conexão continua recuando exponencialmente, de propósito."""
+    embrulhado = requests.exceptions.ConnectionError(
+        urllib3.exceptions.MaxRetryError(
+            pool=None, url="/bot<token>/getUpdates",
+            reason=urllib3.exceptions.NewConnectionError(None, "conexão recusada"),
+        )
+    )
+    with patch.object(telegram._sessao, "post", side_effect=embrulhado):
+        with pytest.raises(TelegramError) as erro:
+            telegram.call(TOKEN, "getUpdates")
+    assert erro.value.timeout is False
 
 
 def test_maratona_de_timeouts_deixa_rastro_no_log(owner, monkeypatch, caplog):
