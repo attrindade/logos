@@ -82,12 +82,14 @@ CONSULTA_COMMANDS = {
     "ver": "ver", "v": "ver",
     "buscar": "buscar", "b": "buscar",
     "hoje": "hoje", "h": "hoje",
+    "pastas": "pastas", "n": "pastas",
     "ajuda": "ajuda", "a": "ajuda",
 }
 
-# `/p3`, `/s2`, `/r1`: o número que apareceu na resposta anterior vira o comando seguinte.
-# É o que dá a curva de aprendizado curta — nada para memorizar, o próximo passo está na tela.
-INDICE_RE = re.compile(r"^([psr])(\d{1,3})$")
+# `/p3`, `/s2`, `/r1`, `/d2`, `/l1`: o número que apareceu na resposta anterior vira o comando
+# seguinte. É o que dá a curva de aprendizado curta — nada para memorizar, o próximo passo está
+# na tela.
+INDICE_RE = re.compile(r"^([psrdl])(\d{1,3})$")
 KIND_LABELS = {
     "texto": "texto", "voz": "voz", "audio": "áudio", "foto": "foto",
     "documento": "documento", "localizacao": "localização",
@@ -101,6 +103,7 @@ MENU = [
     ("ver", "projetos ativos, ou /ver ppj  (atalho: /v)"),
     ("buscar", "procura um termo nas notas  (atalho: /b)"),
     ("hoje", "o briefing mais recente  (atalho: /h)"),
+    ("pastas", "navega pelas pastas e links do vault  (atalho: /n)"),
     ("ajuda", "como mexer aqui  (atalho: /a)"),
     ("tarefa", "registra uma tarefa"),
     ("ideia", "registra uma ideia"),
@@ -534,6 +537,8 @@ class Bot:
                     texto = consulta.cmd_buscar(rest, self.contexto)
                 elif verbo == "hoje":
                     texto = consulta.cmd_hoje(self.contexto)
+                elif verbo == "pastas":
+                    texto = consulta.cmd_pastas(self.contexto)
                 elif verbo == "ajuda":
                     texto = consulta.cmd_ajuda()
                 else:

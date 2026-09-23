@@ -592,7 +592,7 @@ def test_menu_cobre_todos_os_comandos_que_o_bot_entende(owner, api):
     assert set(telegram.PREFIX_COMMANDS) <= nomes
     assert verbos <= nomes
     assert {"nova"} <= nomes
-    for atalho in ("/0", "/v", "/b", "/h", "/a"):
+    for atalho in ("/0", "/v", "/b", "/h", "/n", "/a"):
         assert any(atalho in descricao for _, descricao in telegram.MENU), atalho
     for nome, descricao in telegram.MENU:
         assert nome.islower() and nome.isascii() and 1 <= len(nome) <= 32

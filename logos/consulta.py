@@ -289,6 +289,12 @@ def projetos() -> list[Path]:
     return sorted(notas, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def _universo() -> list[Path]:
+    """Todas as notas legíveis, com os projetos ativos na frente — é a ordem de desempate."""
+    ativos = projetos()
+    return ativos + [p for p in iter_notas() if p not in ativos]
+
+
 def resolver(nome: str) -> list[Path]:
     """Casa o texto digitado com o nome do arquivo, sem acento e sem caixa. Projeto ativo ganha
     do resto: '/ver logos' é a nota do projeto, não uma captura que fala de Logos.
@@ -297,8 +303,7 @@ def resolver(nome: str) -> list[Path]:
     alvo = _fold(nome)
     if not alvo:
         return []
-    ativos = projetos()
-    universo = ativos + [p for p in iter_notas() if p not in ativos]
+    universo = _universo()
 
     exatos = [p for p in universo if _fold(p.stem) == alvo]
     if exatos:
@@ -316,6 +321,113 @@ def briefing_recente() -> Path | None:
         return None
     arquivos = sorted((p for p in pasta.glob("*.md") if p.is_file() and _visivel(p)), key=lambda p: p.name)
     return arquivos[-1] if arquivos else None
+
+
+# ---------------------------------------------------------------------------
+# Pastas
+# ---------------------------------------------------------------------------
+
+def _contar(pasta: Path) -> int:
+    return sum(1 for p in pasta.rglob("*.md") if p.is_file() and _visivel(p))
+
+
+def conteudo_pasta(pasta: Path) -> tuple[list[Path], list[Path]]:
+    """(subpastas, notas) de uma pasta legível. Subpasta sem nota nenhuma não aparece: seria
+    um toque para ver "vazio". Notas da mexida mais recente para a mais antiga."""
+    if not pasta.is_dir() or not _is_allowed(pasta):
+        raise ConsultaError("Essa pasta está fora das que eu leio.")
+    subpastas = sorted(
+        (d for d in pasta.iterdir()
+         if d.is_dir() and not d.name.startswith((".", "~")) and _is_allowed(d) and _contar(d)),
+        key=lambda d: _fold(d.name),
+    )
+    notas = sorted(
+        (p for p in pasta.glob("*.md") if p.is_file() and _visivel(p)),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    return subpastas, notas
+
+
+# ---------------------------------------------------------------------------
+# Ligações: os [[wikilinks]] que saem da nota e as notas que apontam para ela
+# ---------------------------------------------------------------------------
+
+MAX_LIGACOES = 10
+
+_ALIASES_INLINE = re.compile(r"^aliases:\s*\[(.*)\]\s*$")
+
+
+def _aliases(texto: str) -> list[str]:
+    """Os `aliases:` do frontmatter, em lista YAML ou entre colchetes. O parser da `Nota` só lê
+    `chave: valor` numa linha, e há link no vault que só resolve por alias."""
+    linhas = texto.splitlines()
+    if not linhas or linhas[0].strip() != "---":
+        return []
+    nomes: list[str] = []
+    dentro = False
+    for linha in linhas[1:]:
+        if linha.strip() == "---":
+            break
+        inline = _ALIASES_INLINE.match(linha)
+        if inline:
+            return [a.strip().strip("'\"") for a in inline.group(1).split(",") if a.strip()]
+        if linha.startswith("aliases:"):
+            dentro = True
+        elif dentro and linha.lstrip().startswith("- "):
+            nomes.append(linha.lstrip()[2:].strip().strip("'\""))
+        elif dentro and linha.strip():
+            break
+    return nomes
+
+
+def _alvos(texto: str) -> list[str]:
+    """Nomes para onde os wikilinks apontam, sem âncora, alias, pasta nem `.md`. Link só de
+    âncora (`[[#Seção]]`) é a própria nota e fica fora."""
+    alvos = []
+    for match in _WIKILINK.finditer(texto):
+        alvo = match.group(1).split("#", 1)[0].strip().rsplit("/", 1)[-1]
+        if alvo.lower().endswith(".md"):
+            alvo = alvo[:-3]
+        if alvo:
+            alvos.append(alvo)
+    return alvos
+
+
+def ligacoes(path: Path) -> tuple[list[Path], list[Path]]:
+    """(notas para onde esta aponta, notas que apontam para esta), só entre as que eu leio.
+
+    O link resolve como no Obsidian: pelo nome do arquivo, senão por alias. Link para nota fora
+    da allowlist some sem aviso — até o nome dela sairia pelo chat, e o nome de uma entrada do
+    diário já diz mais do que deveria. Lê o vault inteiro a cada nota aberta; com uma centena
+    de notas isso fica na casa dos milissegundos, e um índice em cache envelheceria calado."""
+    textos: dict[Path, str] = {}
+    for nota in _universo():
+        try:
+            textos[nota.resolve()] = nota.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+    indice: dict[str, Path] = {}
+    for nota in textos:
+        indice.setdefault(_fold(nota.stem), nota)
+    for nota, texto in textos.items():
+        for alias in _aliases(texto):
+            indice.setdefault(_fold(alias), nota)
+
+    esta = path.resolve()
+    saem: list[Path] = []
+    for alvo in _alvos(textos.get(esta, "")):
+        destino = indice.get(_fold(alvo))
+        if destino is not None and destino != esta and destino not in saem:
+            saem.append(destino)
+
+    entram = [
+        nota for nota, texto in textos.items()
+        if nota != esta and nota not in saem
+        and any(indice.get(_fold(alvo)) == esta for alvo in _alvos(texto))
+    ]
+    entram.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return saem[:MAX_LIGACOES], entram[:MAX_LIGACOES]
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +477,11 @@ MARCA_BRIEFING = "\u2600\ufe0f"
 MARCA_DICA = "\U0001f4a1"
 MARCA_NADA = "\u2205"
 MARCA_INICIO = "\U0001f9ed"
+MARCA_PASTA = "\U0001f4c2"
+MARCA_LINK = "↪"
 
 MAX_ATALHOS_INICIO = 5
+MAX_NOTAS_PASTA = 15
 
 LIMITE_CITACAO = 700   # acima disso a citação nasce recolhida, com um toque para expandir
 
@@ -488,6 +603,9 @@ class Contexto:
         # A marca vem junto porque o /s0 reabre a nota: sem ela, o índice do briefing
         # voltaria com a marca de nota e o marcador deixaria de significar o que significa.
         self.marca: str = MARCA_NOTA
+        self.pastas: list[Path] = []
+        self.pasta: Path | None = None     # a última pasta aberta, para o /d0 voltar a ela
+        self.links: list[Path] = []
 
     def lembrar_projetos(self, notas: list[Path]) -> None:
         self.projetos = list(notas)
@@ -495,18 +613,29 @@ class Contexto:
     def lembrar_resultados(self, notas: list[Path]) -> None:
         self.resultados = list(notas)
 
-    def lembrar_nota(self, nota: "Nota", marca: str = MARCA_NOTA) -> None:
+    def lembrar_pastas(self, pastas: list[Path], aberta: Path | None = None) -> None:
+        self.pastas = list(pastas)
+        self.pasta = aberta
+
+    def lembrar_nota(self, nota: "Nota", marca: str = MARCA_NOTA,
+                     links: list[Path] | None = None) -> None:
+        """`links=None` mantém os de antes: abrir uma seção não muda os links da nota."""
         self.nota = nota.path
         self.secoes = [titulo for titulo, _ in nota.secoes]
         self.marca = marca
+        if links is not None:
+            self.links = list(links)
 
     def escolher(self, letra: str, numero: int) -> Path:
-        lista = {"p": self.projetos, "r": self.resultados}[letra]
-        rotulo = {"p": "lista de projetos", "r": "busca"}[letra]
+        lista = {"p": self.projetos, "r": self.resultados, "d": self.pastas, "l": self.links}[letra]
+        rotulo, refazer = {
+            "p": ("lista de projetos", "Mande /ver de novo."),
+            "r": ("lista", "Mande /buscar ou /pastas de novo."),
+            "d": ("lista de pastas", "Mande /pastas de novo."),
+            "l": ("lista de links", "Abra uma nota com /ver."),
+        }[letra]
         if not lista:
-            raise ConsultaError(
-                f"Não tenho essa {rotulo} aqui. Mande /ver ou /buscar de novo."
-            )
+            raise ConsultaError(f"Não tenho essa {rotulo} aqui. {refazer}")
         if not 1 <= numero <= len(lista):
             raise ConsultaError(f"A {rotulo} tem {len(lista)} itens, e você pediu o {numero}.")
         return lista[numero - 1]
@@ -525,9 +654,27 @@ def render_projetos(notas: list[Path]) -> str:
     return "\n".join(linhas) + dica("/p1 abre o primeiro", "/buscar termo", "/ajuda")
 
 
-def render_nota(nota: Nota, marca: str = MARCA_NOTA) -> str:
+def _render_ligacoes(saem: list[Path], entram: list[Path]) -> list[str]:
+    """Os links viram `/l1`, `/l2`… numa numeração só: quem lê não precisa saber de que lado
+    o link está para segui-lo, só que dá para seguir."""
+    linhas: list[str] = []
+    indice = 0
+    for titulo, notas in (("Links", saem), ("Citada em", entram)):
+        if not notas:
+            continue
+        linhas += ["", f"<b>{titulo}</b>"]
+        for path in notas:
+            indice += 1
+            linhas.append(f"/l{indice}  {MARCA_LINK} {esc(path.stem)}")
+    return linhas
+
+
+def render_nota(nota: Nota, marca: str = MARCA_NOTA, saem: list[Path] | None = None,
+                entram: list[Path] | None = None, volta: str = "/ver volta aos projetos") -> str:
     cabeca = [f"{marca} <b>{esc(nota.titulo)}</b>", f"<i>{esc(_meta_linha(nota))}</i>"]
     descricao = nota.meta.get("description")
+    ligacoes_ = _render_ligacoes(saem or [], entram or [])
+    seguir = "/l1 segue o primeiro link" if ligacoes_ else ""
 
     inteira = "\n\n".join(
         [nota.intro] + [f"{titulo}\n{_corpo(linhas)}" for titulo, linhas in nota.secoes]
@@ -535,7 +682,7 @@ def render_nota(nota: Nota, marca: str = MARCA_NOTA) -> str:
 
     if len(inteira) <= LIMITE_NOTA_INTEIRA:
         corpo = citacao(esc(inteira)) if inteira else "<i>Nota sem conteúdo além do frontmatter.</i>"
-        return "\n".join(cabeca + ["", corpo]) + dica("/ver volta aos projetos", "/ajuda")
+        return "\n".join(cabeca + ["", corpo] + ligacoes_) + dica(seguir, volta, "/ajuda")
 
     # Nota longa: as seções viram comandos. Ninguém lê 14 KB de uma vez no celular, e digitar
     # o nome da seção seria pior do que rolar a nota no Obsidian.
@@ -547,7 +694,7 @@ def render_nota(nota: Nota, marca: str = MARCA_NOTA) -> str:
     partes += ["", f"<b>{len(nota.secoes)} seções</b>"]
     for indice, (titulo, _) in enumerate(nota.secoes, 1):
         partes.append(f"/s{indice}  {MARCA_SECAO} {esc(titulo)}")
-    return "\n".join(partes) + dica("/s1 abre a primeira", "/ver volta aos projetos")
+    return "\n".join(partes + ligacoes_) + dica("/s1 abre a primeira", seguir, volta)
 
 
 def render_secao(nota: Nota, indice: int) -> str:
@@ -599,6 +746,33 @@ def _pasta(path: Path) -> str:
     return caminho.rsplit("/", 1)[0] if "/" in caminho else caminho
 
 
+def render_pastas(raizes: list[Path]) -> str:
+    if not raizes:
+        return f"{MARCA_NADA} Nenhuma das pastas que eu leio existe neste vault."
+    linhas = [f"{MARCA_PASTA} <b>Pastas que eu leio</b>", ""]
+    for indice, pasta in enumerate(raizes, 1):
+        linhas.append(f"/d{indice}  <b>{esc(rel(pasta))}</b>  <i>{_contar(pasta)} notas</i>")
+    return "\n".join(linhas) + dica("/d1 abre a primeira", "/b termo procura em todas")
+
+
+def render_pasta(pasta: Path, subpastas: list[Path], notas: list[Path]) -> str:
+    """Subpastas como `/d`, notas como `/r`. Pasta grande mostra só as mais recentes: rolar
+    trinta capturas no celular é pior que procurar, então o rodapé aponta para a busca."""
+    partes = [f"{MARCA_PASTA} <b>{esc(rel(pasta))}</b>", ""]
+    for indice, sub in enumerate(subpastas, 1):
+        partes.append(f"/d{indice}  {MARCA_PASTA} <b>{esc(sub.name)}</b>  <i>{_contar(sub)} notas</i>")
+    if subpastas and notas:
+        partes.append("")
+    for indice, path in enumerate(notas[:MAX_NOTAS_PASTA], 1):
+        partes.append(f"/r{indice}  {MARCA_NOTA} {esc(path.stem)}  <i>{_data(path)}</i>")
+    if len(notas) > MAX_NOTAS_PASTA:
+        partes.append(f"<i>… e mais {len(notas) - MAX_NOTAS_PASTA} mais antigas; /b procura nelas.</i>")
+    if not subpastas and not notas:
+        partes.append("<i>Pasta vazia.</i>")
+    abrir = "/r1 abre a mais recente" if notas else "/d1 entra na primeira"
+    return "\n".join(partes) + dica(abrir, "/pastas volta ao topo")
+
+
 def render_inicio(notas: list[Path], briefing: Path | None) -> str:
     """Tela inicial do `/0`: para onde ir, com os atalhos já carregados.
 
@@ -614,6 +788,7 @@ def render_inicio(notas: list[Path], briefing: Path | None) -> str:
         partes.append("")
     if briefing is not None:
         partes.append(f"{MARCA_BRIEFING} /h  <b>Briefing</b>  <i>{_data(briefing)}</i>")
+    partes.append(f"{MARCA_PASTA} /n  <b>Navegar</b> pelas pastas")
     partes.append(f"{MARCA_BUSCA} /b &lt;termo&gt;  <b>Procurar</b> em tudo que eu leio")
     return "\n".join(partes) + dica("/a explica o resto", "ou mande texto/voz para capturar")
 
@@ -630,17 +805,21 @@ def render_ajuda() -> str:
         "<code>/ver ppj</code> abre uma nota\n"
         "<code>/buscar renato</code> procura nas notas\n"
         "<code>/hoje</code> o briefing mais recente\n"
+        "<code>/pastas</code> navega pelas pastas do vault\n"
         "\n"
         "<b>Os números das respostas são comandos.</b> Toque ou digite:\n"
         f"{MARCA_PROJETO} <code>/p1</code> projeto da lista\n"
         f"{MARCA_SECAO} <code>/s1</code> seção da nota aberta  \u00b7  <code>/s0</code> índice\n"
-        f"{MARCA_BUSCA} <code>/r1</code> resultado da busca\n"
+        f"{MARCA_BUSCA} <code>/r1</code> resultado da busca ou nota da pasta\n"
+        f"{MARCA_PASTA} <code>/d1</code> pasta  ·  <code>/d0</code> volta à pasta aberta\n"
+        f"{MARCA_LINK} <code>/l1</code> segue um link da nota aberta\n"
         "\n"
         "<b>Atalhos de uma letra:</b> <code>/v</code> <code>/b</code> <code>/h</code> "
-        "<code>/a</code>\n"
+        "<code>/n</code> <code>/a</code>\n"
         "\n"
         "<b>Um fluxo inteiro:</b>\n"
         "<code>/0</code> \u2192 <code>/p1</code> \u2192 <code>/s3</code>\n"
+        "<code>/n</code> \u2192 <code>/d2</code> \u2192 <code>/r1</code> \u2192 <code>/l1</code>\n"
         "\n"
         "<b>Capturar</b> segue igual: mande texto, voz, foto, PDF ou link.\n"
         "<code>/tarefa</code> <code>/ideia</code> <code>/planejamento</code> "
@@ -653,9 +832,30 @@ def render_ajuda() -> str:
 # ---------------------------------------------------------------------------
 
 def _abrir(path: Path, ctx: Contexto, marca: str = MARCA_NOTA) -> str:
-    nota = carregar(path)
-    ctx.lembrar_nota(nota, marca)
-    return render_nota(nota, marca)
+    return _mostrar(carregar(path), ctx, marca)
+
+
+def _mostrar(nota: Nota, ctx: Contexto, marca: str) -> str:
+    """Nota com os links já numerados. O rodapé volta para onde ele veio: a pasta, se a nota
+    foi aberta de dentro dela, senão os projetos."""
+    saem, entram = ligacoes(nota.path)
+    ctx.lembrar_nota(nota, marca, saem + entram)
+    veio_da_pasta = ctx.pasta is not None and nota.path.resolve().parent == ctx.pasta.resolve()
+    volta = "/d0 volta à pasta" if veio_da_pasta else "/ver volta aos projetos"
+    return render_nota(nota, marca, saem, entram, volta)
+
+
+def _abrir_pasta(pasta: Path, ctx: Contexto) -> str:
+    subpastas, notas = conteudo_pasta(pasta)
+    ctx.lembrar_pastas(subpastas, aberta=pasta)
+    ctx.lembrar_resultados(notas[:MAX_NOTAS_PASTA])
+    return render_pasta(pasta, subpastas, notas)
+
+
+def cmd_pastas(ctx: Contexto) -> str:
+    raizes = allowed_roots()
+    ctx.lembrar_pastas(raizes)
+    return render_pastas(raizes)
 
 
 def cmd_ver(argumento: str, ctx: Contexto) -> str:
@@ -683,7 +883,8 @@ def cmd_ver(argumento: str, ctx: Contexto) -> str:
     if indice is None:
         return _abrir(candidatos[0], ctx)
     nota = carregar(candidatos[0])
-    ctx.lembrar_nota(nota)
+    saem, entram = ligacoes(nota.path)
+    ctx.lembrar_nota(nota, links=saem + entram)
     return render_secao(nota, indice)
 
 
@@ -704,15 +905,22 @@ def cmd_hoje(ctx: Contexto) -> str:
 
 
 def cmd_indice(letra: str, numero: int, ctx: Contexto) -> str:
-    """`/p3`, `/s2`, `/r1`. O número que apareceu na resposta anterior é o comando seguinte —
-    é isso que torna o bot aprendível sem ler a ajuda."""
+    """`/p3`, `/s2`, `/r1`, `/d2`, `/l1`. O número que apareceu na resposta anterior é o
+    comando seguinte — é isso que torna o bot aprendível sem ler a ajuda."""
     if letra == "s":
         if ctx.nota is None:
             raise ConsultaError("Nenhuma nota aberta. Mande /ver e escolha uma.")
         nota = carregar(ctx.nota)
-        marca = ctx.marca
-        ctx.lembrar_nota(nota, marca)
-        return render_nota(nota, marca) if numero == 0 else render_secao(nota, numero)
+        if numero == 0:
+            return _mostrar(nota, ctx, ctx.marca)
+        ctx.lembrar_nota(nota, ctx.marca)
+        return render_secao(nota, numero)
+    if letra == "d":
+        if numero == 0:
+            if ctx.pasta is None:
+                raise ConsultaError("Nenhuma pasta aberta. Mande /pastas e escolha uma.")
+            return _abrir_pasta(ctx.pasta, ctx)
+        return _abrir_pasta(ctx.escolher("d", numero), ctx)
     return _abrir(ctx.escolher(letra, numero), ctx)
 
 

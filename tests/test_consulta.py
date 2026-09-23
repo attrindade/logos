@@ -324,10 +324,131 @@ def test_secao_sem_nota_aberta(vault, ctx):
 
 def test_indice_de_lista_que_venceu(vault, ctx):
     """Depois de um relançamento o contexto nasce vazio: /p3 tem de explicar, não explodir."""
-    with pytest.raises(consulta.ConsultaError, match="Mande /ver ou /buscar"):
+    with pytest.raises(consulta.ConsultaError, match="Mande /ver de novo"):
         consulta.cmd_indice("p", 3, ctx)
-    with pytest.raises(consulta.ConsultaError, match="Mande /ver ou /buscar"):
+    with pytest.raises(consulta.ConsultaError, match="Mande /buscar ou /pastas"):
         consulta.cmd_indice("r", 1, ctx)
+    with pytest.raises(consulta.ConsultaError, match="Mande /pastas"):
+        consulta.cmd_indice("d", 2, ctx)
+    with pytest.raises(consulta.ConsultaError, match="Nenhuma pasta aberta"):
+        consulta.cmd_indice("d", 0, ctx)
+    with pytest.raises(consulta.ConsultaError, match="Abra uma nota"):
+        consulta.cmd_indice("l", 1, ctx)
+
+
+# ---------------------------------------------------------------------------
+# Navegação: pastas e links
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def vault_ligado(vault):
+    """O vault de teste com links de verdade: um que resolve pelo nome, um por alias, um para
+    fora da allowlist e um de âncora, que aponta para a própria nota."""
+    (vault / "brain/Key Decisions.md").write_text(
+        "# Key Decisions\n\n"
+        "- Ver [[PPJ]] e [[Govinho|o apelido]].\n"
+        "- O [[2026-09-20 - Diario]] não pode aparecer.\n"
+        "- Interno: [[#Outra seção]] e [[Inexistente]].\n",
+        encoding="utf-8",
+    )
+    (vault / "org").mkdir()
+    (vault / "org/Clima.md").write_text(
+        "---\naliases:\n  - Govinho\n  - GC\n---\n\n# Clima\n\nCita [[Key Decisions]].\n",
+        encoding="utf-8",
+    )
+    (vault / "work/active/Logos/Plano.md").write_text("# Plano\n\nVolta ao [[Logos]].\n",
+                                                      encoding="utf-8")
+    return vault
+
+
+def test_pastas_lista_so_a_allowlist(vault, ctx):
+    resposta = consulta.cmd_pastas(ctx)
+    for termo in PROIBIDO:
+        assert termo.lower() not in resposta.lower(), termo
+    assert "/d1" in resposta and "work/active" in resposta
+    assert len(ctx.pastas) == len(consulta.allowed_roots())
+
+
+def test_pasta_mostra_subpastas_e_notas_numeradas(vault_ligado, ctx):
+    consulta.cmd_pastas(ctx)
+    indice = [consulta.rel(p) for p in ctx.pastas].index("work/active") + 1
+    resposta = consulta.cmd_indice("d", indice, ctx)
+    assert "/d1" in resposta and "Logos" in resposta       # subpasta
+    assert "/r1" in resposta and "PPJ" in resposta         # nota
+    assert [p.name for p in ctx.pastas] == ["Logos"]
+
+    sub = consulta.cmd_indice("d", 1, ctx)
+    assert "work/active/Logos" in sub and "Plano" in sub
+    # /d0 reabre a pasta aberta, e a nota aberta de dentro dela oferece a volta.
+    nota = consulta.cmd_indice("r", 1, ctx)
+    assert "/d0 volta à pasta" in nota
+    assert "work/active/Logos" in consulta.cmd_indice("d", 0, ctx)
+
+
+def test_pasta_grande_mostra_as_recentes_e_aponta_a_busca(vault, ctx, monkeypatch):
+    monkeypatch.setattr(consulta, "MAX_NOTAS_PASTA", 1)
+    resposta = consulta.render_pasta(vault / "briefings", *consulta.conteudo_pasta(vault / "briefings"))
+    assert "/r1" in resposta and "/r2" not in resposta
+    assert "e mais 1" in resposta and "/b" in resposta
+
+
+def test_pasta_fora_da_allowlist_e_recusada(vault, ctx):
+    with pytest.raises(consulta.ConsultaError, match="fora das que eu leio"):
+        consulta.conteudo_pasta(vault / "capturas" / "Diario")
+    with pytest.raises(consulta.ConsultaError, match="fora das que eu leio"):
+        consulta.conteudo_pasta(vault / "capturas")   # a mãe do Diário também não
+
+
+def test_links_resolvem_por_nome_e_alias_e_somem_fora_da_allowlist(vault_ligado, ctx):
+    resposta = consulta.cmd_ver("key decisions", ctx)
+    # O corpo da nota cita o diário pelo nome, e o corpo sempre foi mostrado como está; o que
+    # não pode é a lista de links transformar esse nome num atalho que abre alguma coisa.
+    links = resposta.split("<b>Links</b>")[-1]
+    for termo in PROIBIDO + ("2026-09-20", "Inexistente"):
+        assert termo.lower() not in links.lower(), termo
+    nomes = [p.stem for p in ctx.links]
+    # PPJ pelo nome, Clima pelo alias; Clima também cita esta nota, mas não aparece duas vezes.
+    assert nomes == ["PPJ", "Clima"]
+    assert "/l1" in resposta and "/l2" in resposta
+
+    seguido = consulta.cmd_indice("l", 2, ctx)
+    assert "<b>Clima</b>" in seguido
+
+
+def test_citada_em_lista_quem_aponta_para_a_nota(vault_ligado, ctx):
+    resposta = consulta.cmd_ver("ppj", ctx)
+    assert "Citada em" in resposta and "Key Decisions" in resposta
+    assert "Key Decisions" in [p.stem for p in ctx.links]
+
+
+def test_abrir_secao_preserva_os_links_da_nota(vault_ligado, ctx):
+    consulta.cmd_ver("ppj", ctx)
+    antes = list(ctx.links)
+    consulta.cmd_indice("s", 1, ctx)
+    assert ctx.links == antes and antes
+
+
+def test_aliases_em_lista_e_entre_colchetes():
+    assert consulta._aliases("---\naliases:\n  - A\n  - 'B'\ntags: x\n---\n") == ["A", "B"]
+    assert consulta._aliases("---\naliases: [A, \"B\"]\n---\n") == ["A", "B"]
+    assert consulta._aliases("# sem frontmatter\naliases:\n  - A\n") == []
+
+
+def test_navegacao_nao_vaza_o_diario(vault_ligado, ctx):
+    """A trava de `test_diario_nunca_aparece`, passada por todo caminho de navegação."""
+    respostas = [consulta.cmd_pastas(ctx)]
+    pastas = list(ctx.pastas)
+    while pastas:
+        pasta = pastas.pop()
+        respostas.append(consulta._abrir_pasta(pasta, ctx))
+        pastas.extend(ctx.pastas)
+    for nome in ("key decisions", "clima", "ppj", "logos"):
+        respostas.append(consulta.cmd_ver(nome, ctx))
+        for destino in list(ctx.links):
+            respostas.append(consulta._abrir(destino, ctx))
+    for resposta in respostas:
+        for termo in PROIBIDO:
+            assert termo.lower() not in resposta.lower(), f"vazou “{termo}” em: {resposta[:200]}"
 
 
 def test_indice_fora_da_lista(vault, ctx):
@@ -442,7 +563,6 @@ def test_wikilink_com_ancora_perde_a_cerquilha(vault):
     assert consulta.limpar("ver [[PPJ#Equipe]]") == "ver Equipe"
     assert consulta.limpar("ver [[PPJ#Equipe|a equipe]]") == "ver a equipe"
     assert consulta.limpar("ver [[PPJ]]") == "ver PPJ"
-
 
 def test_s0_do_briefing_volta_com_a_marca_do_briefing(vault, ctx):
     """Marcador é semântica: /h → /s1 → /s0 não pode devolver o briefing como nota comum."""
