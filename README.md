@@ -115,6 +115,10 @@ The same bot reads the vault, with no LLM and without writing anything:
 | `/hoje` | `/h` | the most recent briefing in `briefings/` |
 | `/ajuda` | `/a` | the whole system on one screen |
 
+A fixed **🧭 Início** button sits below the text field (reply keyboard), installed along with
+every plain-text reply; the bot recognizes its exact label before treating a message as a
+capture.
+
 **After `/inicio` it is all buttons.** Every reply carries inline buttons (projects, sections,
 folders, links, search results), and tapping one replaces that same message instead of sending a
 new one: navigation happens in a single window, with ⬅ (always the folder above) and 🧭 Início.

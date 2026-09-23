@@ -110,6 +110,10 @@ O mesmo bot lê o vault, sem LLM e sem escrever nada:
 | `/hoje` | `/h` | o briefing mais recente de `briefings/` |
 | `/ajuda` | `/a` | o sistema inteiro numa tela |
 
+Um botão fixo **🧭 Início** fica embaixo do campo de texto (reply keyboard), instalado junto
+de toda resposta em texto puro; o bot reconhece o rótulo exato antes de tratar a mensagem como
+captura.
+
 **Depois do `/inicio`, é tudo botão.** Toda resposta traz botões (projetos, seções, pastas,
 links, resultados de busca), e tocar num deles troca a própria mensagem em vez de mandar outra: a
 navegação acontece numa janela só, com ⬅ (sempre a pasta de cima) e 🧭 Início. O botão Buscar

@@ -874,7 +874,8 @@ def render_ajuda() -> Tela:
     texto = (
         f"{MARCA_DICA} <b>Como mexer aqui</b>\n"
         "\n"
-        f"<b>Consultar:</b> /inicio e depois só botões. Tocar num botão troca esta mesma "
+        f"<b>Consultar:</b> {INICIO[0]}, o botão fixo embaixo do campo de texto (ou /inicio), "
+        f"e depois só botões. Tocar num botão troca esta mesma "
         f"mensagem; {MARCA_VOLTA} volta um nível e {MARCA_INICIO} recomeça.\n"
         "\n"
         "<b>Atalhos digitados</b>, se preferir:\n"

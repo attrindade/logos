@@ -696,6 +696,34 @@ def test_buscar_pelo_botao_pergunta_e_a_resposta_vira_busca(owner, api, vault_fa
     assert 77 not in bot.pedidos_busca
 
 
+def test_botao_fixo_abre_o_inicio_e_nao_vira_captura(owner, api, vault_falso):
+    """O botão fixo manda o próprio rótulo como texto; sem reconhecê-lo, cada toque viraria
+    uma nota com o texto "🧭 Início"."""
+    bot = Bot(TOKEN)
+    bot.handle_update(_update(telegram.BOTAO_INICIO))
+    assert bot.session is None and list(config.INBOX_DIR.iterdir()) == []
+    [envio] = _chamadas(api, "sendMessage")
+    assert "Para onde" in envio["text"] and "inline_keyboard" in envio["reply_markup"]
+
+
+def test_so_o_rotulo_exato_e_consulta(owner, api, vault_falso, downloads):
+    """"início da reunião" é captura; só o rótulo do botão abre o Início."""
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("Início da reunião com a Bruna"))
+    assert bot.session is not None
+
+
+def test_respostas_em_texto_instalam_o_botao_fixo(owner, api, vault_falso, downloads):
+    """O /start e todo recibo de captura levam o teclado fixo: depois do primeiro, ele fica."""
+    bot = Bot(TOKEN)
+    for texto in ("/start", "uma ideia solta"):
+        api.reset_mock()
+        bot.handle_update(_update(texto))
+        teclado = _chamadas(api, "sendMessage")[0]["reply_markup"]
+        assert teclado["keyboard"] == [[{"text": telegram.BOTAO_INICIO}]]
+        assert teclado["is_persistent"] is True
+
+
 def test_barra_buscar_sem_termo_pergunta(owner, api, vault_falso):
     api.return_value = {"message_id": 77}
     bot = Bot(TOKEN)

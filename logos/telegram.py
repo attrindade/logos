@@ -109,6 +109,20 @@ MENU = [
     ("nova", "fecha a sessão de captura agora"),
 ]
 
+# Botão fixo embaixo do campo de texto (reply keyboard). Os botões da consulta vivem presos a
+# uma mensagem e somem rolando o chat; este fica sempre à mão, e é a porta de entrada para quem
+# não lembra de comando nenhum. Tocar nele manda o próprio rótulo como texto — por isso o bot
+# reconhece o rótulo exato antes de tratar a mensagem como captura. Vai junto de toda resposta
+# em texto puro (o `reply`): uma mensagem só aceita um teclado, e as da consulta já levam os
+# botões delas. Reenviar o mesmo teclado não muda nada no app.
+BOTAO_INICIO = consulta.INICIO[0]
+TECLADO_FIXO = {
+    "keyboard": [[{"text": BOTAO_INICIO}]],
+    "is_persistent": True,
+    "resize_keyboard": True,
+    "input_field_placeholder": "texto, voz ou foto para capturar",
+}
+
 DIARIO_AVISO = (
     "Lembrete: Diário pelo Telegram passa pela nuvem do Telegram. "
     "O caminho do Diário continua sendo o gravador + Syncthing."
@@ -126,7 +140,7 @@ def _ajuda() -> str:
         "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
         "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela.\n"
         "\n"
-        "Consultar: /inicio e depois é só tocar nos botões."
+        f"Consultar: toque em {BOTAO_INICIO}, embaixo do campo de texto, e depois é só tocar nos botões."
     )
 
 
@@ -432,6 +446,7 @@ class Bot:
                 self.token, "sendMessage",
                 chat_id=message["chat"]["id"], text=text,
                 reply_parameters={"message_id": message["message_id"], "allow_sending_without_reply": True},
+                reply_markup=TECLADO_FIXO,
             )
         except TelegramError as e:
             logger.warning(f"Telegram: falha ao responder: {e}")
@@ -554,6 +569,9 @@ class Bot:
             logger.warning(f"Telegram: mensagem de chat não autorizado ignorada (chat_id={chat_id})")
             return
 
+        if text == BOTAO_INICIO:
+            self._consultar(message, "inicio", lambda: consulta.cmd_inicio(self.contexto))
+            return
         respondida = (message.get("reply_to_message") or {}).get("message_id")
         if text and not command and respondida in self.pedidos_busca:
             self.pedidos_busca.discard(respondida)
