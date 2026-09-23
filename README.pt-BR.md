@@ -103,21 +103,23 @@ O mesmo bot lê o vault, sem LLM e sem escrever nada:
 
 | Comando | Atalho | O que faz |
 | :--- | :--- | :--- |
-| `/inicio` | `/0` | para onde ir: projetos, briefing e busca, já numerados |
+| `/inicio` | `/0` | para onde ir: projetos, briefing, pastas e busca, em botões |
 | `/ver` | `/v` | lista os projetos ativos, do mexido mais recentemente para o mais antigo |
 | `/ver <nome>` | | abre a nota; se for longa, devolve o índice de seções |
 | `/buscar <termo>` | `/b` | linhas que casam, agrupadas por arquivo (sem acento e sem caixa) |
 | `/hoje` | `/h` | o briefing mais recente de `briefings/` |
 | `/ajuda` | `/a` | o sistema inteiro numa tela |
 
-**Os números das respostas são comandos.** É o que dá a curva de aprendizado curta: nada para
-memorizar, porque o próximo passo já está na tela. `/p1` abre o primeiro projeto da última
-lista, `/s3` a terceira seção da nota aberta (`/s0` volta ao índice) e `/r2` o segundo resultado
-da última busca. Um fluxo inteiro é `/0` → `/p1` → `/s3`, sem digitar nome nenhum.
+**Depois do `/inicio`, é tudo botão.** Toda resposta traz botões (projetos, seções, pastas,
+links, resultados de busca), e tocar num deles troca a própria mensagem em vez de mandar outra: a
+navegação acontece numa janela só, com ⬅ (sempre a pasta de cima) e 🧭 Início. O botão Buscar
+pergunta o termo com `force_reply`, e a resposta vira busca, não captura. Jobs (`/j`) pedem
+confirmação antes de rodar.
 
-Esses índices vivem num `consulta.Contexto` por processo, em memória. Não persistem de
-propósito: um índice que sobrevive a um relançamento apontaria para outra nota sem avisar, então
-depois de uma queda `/p3` responde que a lista venceu em vez de abrir a coisa errada.
+Cada botão carrega um código curto do caminho da nota, não a posição numa lista: a mensagem
+antiga continua tocável, e "o terceiro da última lista" abriria outra nota sem avisar. Os códigos
+vivem num `consulta.Contexto` por processo, em memória, com uma geração aleatória na frente;
+depois de um relançamento o botão velho diz que venceu em vez de abrir a coisa errada.
 
 A saída vai em HTML da Bot API, com o Markdown do vault reduzido a texto legível: wikilink vira o alias, pictograma sai, separador de tabela some, frontmatter fica fora da busca. O corpo das notas vai em `<blockquote>`, e em `<blockquote expandable>` quando passa de `LIMITE_CITACAO` — a nota chega inteira ocupando quatro linhas na tela. Por isso o `partir` fecha e reabre a citação na fronteira entre mensagens: cortar por caractere partiria uma tag. Cada tipo de resposta abre com um marcador fixo (`MARCA_PROJETO`, `MARCA_SECAO`, `MARCA_BUSCA`, `MARCA_BRIEFING`, `MARCA_INICIO`) e fecha com uma dica do próximo comando; o emoji é semântica, não enfeite, e o que vem do vault continua sendo limpo de pictograma. `send()` e `notify()` seguem em texto puro — ligar HTML neles quebraria o briefing, que manda `<` e `&` sem escapar.
 

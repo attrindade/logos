@@ -108,21 +108,23 @@ The same bot reads the vault, with no LLM and without writing anything:
 
 | Command | Shortcut | What it does |
 | :--- | :--- | :--- |
-| `/inicio` | `/0` | where to go: projects, briefing and search, already numbered |
+| `/inicio` | `/0` | where to go: projects, briefing, folders and search, as buttons |
 | `/ver` | `/v` | lists active projects, most recently touched first |
 | `/ver <name>` | | opens the note; long ones come back as a section index |
 | `/buscar <term>` | `/b` | matching lines grouped by file (accent- and case-insensitive) |
 | `/hoje` | `/h` | the most recent briefing in `briefings/` |
 | `/ajuda` | `/a` | the whole system on one screen |
 
-**The numbers in each reply are commands.** That is what keeps the learning curve short: nothing
-to memorize, because the next step is already on screen. `/p1` opens the first project of the
-last listing, `/s3` the third section of the open note (`/s0` goes back to the index) and `/r2`
-the second search result. A full flow is `/0` → `/p1` → `/s3`, typing no names at all.
+**After `/inicio` it is all buttons.** Every reply carries inline buttons (projects, sections,
+folders, links, search results), and tapping one replaces that same message instead of sending a
+new one: navigation happens in a single window, with ⬅ (always the folder above) and 🧭 Início.
+The Buscar button asks for the term with `force_reply`, and the answer is treated as a search,
+not a capture. Jobs (`/j`) ask for confirmation before running.
 
-These indexes live in a per-process `consulta.Contexto`, in memory. They deliberately do not
-persist: an index surviving a restart would silently point at a different note, so after a crash
-`/p3` says the listing expired instead of opening the wrong thing.
+Each button carries a short code for the note's path, not its position in a list: old messages
+stay tappable, and "the third item of the last listing" would silently open a different note.
+Codes live in a per-process `consulta.Contexto`, in memory, prefixed with a random generation,
+so after a restart an old button says it expired instead of opening the wrong thing.
 
 Output goes out as Bot API HTML, with the vault's Markdown reduced to readable text: wikilinks become their alias, pictographs are dropped, table separators disappear, frontmatter stays out of search results. Note bodies go in `<blockquote>`, or `<blockquote expandable>` past `LIMITE_CITACAO`. That is why `partir` closes and reopens the quote at message boundaries: splitting by character would cut a tag in half. Each kind of reply opens with a fixed marker and ends with a hint for the next command; the emoji is semantics, not decoration, and vault text is still stripped of pictographs. `send()` and `notify()` remain plain text — turning HTML on for them would break the briefing, which sends `<` and `&` unescaped.
 
