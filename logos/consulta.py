@@ -477,6 +477,7 @@ MARCA_BRIEFING = "\u2600\ufe0f"
 MARCA_DICA = "\U0001f4a1"
 MARCA_NADA = "\u2205"
 MARCA_INICIO = "\U0001f9ed"
+MARCA_JOB = "⚙️"
 MARCA_PASTA = "\U0001f4c2"
 MARCA_LINK = "↪"
 
@@ -790,6 +791,7 @@ def render_inicio(notas: list[Path], briefing: Path | None) -> str:
         partes.append(f"{MARCA_BRIEFING} /h  <b>Briefing</b>  <i>{_data(briefing)}</i>")
     partes.append(f"{MARCA_PASTA} /n  <b>Navegar</b> pelas pastas")
     partes.append(f"{MARCA_BUSCA} /b &lt;termo&gt;  <b>Procurar</b> em tudo que eu leio")
+    partes.append(f"{MARCA_JOB} /j  <b>Rodar um job</b> no PC")
     return "\n".join(partes) + dica("/a explica o resto", "ou mande texto/voz para capturar")
 
 
@@ -813,6 +815,8 @@ def render_ajuda() -> str:
         f"{MARCA_BUSCA} <code>/r1</code> resultado da busca ou nota da pasta\n"
         f"{MARCA_PASTA} <code>/d1</code> pasta  ·  <code>/d0</code> volta à pasta aberta\n"
         f"{MARCA_LINK} <code>/l1</code> segue um link da nota aberta\n"
+        "\n"
+        f"{MARCA_JOB} <code>/j</code> roda um job no PC (promover, reuniões, briefing)\n"
         "\n"
         "<b>Atalhos de uma letra:</b> <code>/v</code> <code>/b</code> <code>/h</code> "
         "<code>/n</code> <code>/a</code>\n"

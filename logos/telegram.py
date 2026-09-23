@@ -45,7 +45,7 @@ import requests
 import urllib3
 import yaml
 
-from . import config, consulta
+from . import config, consulta, jobs
 from .triage import TELEGRAM_TAG, _normalize_word
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,10 @@ CONSULTA_COMMANDS = {
 # seguinte. É o que dá a curva de aprendizado curta — nada para memorizar, o próximo passo está
 # na tela.
 INDICE_RE = re.compile(r"^([psrdl])(\d{1,3})$")
+# `/j1`: mesma ideia do `/p3`, para os jobs do PC. Fica separado do INDICE_RE porque não
+# depende do contexto da conversa — a lista de jobs é fixa, não é resultado de uma busca.
+JOB_RE = re.compile(r"^j(\d{1,2})$")
+JOB_COMMANDS = {"j": "jobs", "jobs": "jobs"}
 KIND_LABELS = {
     "texto": "texto", "voz": "voz", "audio": "áudio", "foto": "foto",
     "documento": "documento", "localizacao": "localização",
@@ -105,6 +109,7 @@ MENU = [
     ("hoje", "o briefing mais recente  (atalho: /h)"),
     ("pastas", "navega pelas pastas e links do vault  (atalho: /n)"),
     ("ajuda", "como mexer aqui  (atalho: /a)"),
+    ("j", "roda um job no PC (promover, reuniões, briefing)"),
     ("tarefa", "registra uma tarefa"),
     ("ideia", "registra uma ideia"),
     ("planejamento", "registra um planejamento"),
@@ -500,6 +505,8 @@ class Bot:
             self.reply(message, "Logos já está conectado a este chat.\n\n" + _ajuda())
         elif command in CONSULTA_COMMANDS or INDICE_RE.match(command):
             self._consultar(message, command, rest)
+        elif command in JOB_COMMANDS or JOB_RE.match(command):
+            self._job(message, command)
         elif command in PREFIX_COMMANDS:
             if not rest:
                 self.reply(message, f"Uso: /{command} <texto>")
@@ -552,6 +559,28 @@ class Bot:
             return
         self.reply_html(message, texto)
         logger.info(f"Telegram: /{command} respondido em {time.monotonic() - inicio:.1f}s")
+
+    def _job(self, message: dict, command: str) -> None:
+        """Dispara um job headless do vault. Não toca a sessão de captura, como a consulta."""
+        indice = JOB_RE.match(command)
+        try:
+            if not indice:
+                self.reply_html(message, jobs.render_lista())
+                return
+            job = jobs.por_indice(int(indice.group(1)))
+            if job is None:
+                self.reply_html(message, f"Não existe /{command}. /j lista o que dá para rodar.")
+                return
+            texto = jobs.disparar(job)
+        except jobs.JobError as e:
+            self.reply(message, str(e))
+            return
+        except Exception:
+            logger.exception(f"Telegram: falha ao disparar /{command}")
+            self.reply(message, "Não consegui disparar o job. O log do Logos tem o motivo.")
+            return
+        self.reply_html(message, texto)
+        logger.info(f"Telegram: /{command} disparado")
 
     @staticmethod
     def _classify(message: dict, text: str) -> tuple[str | None, dict | None, str]:
