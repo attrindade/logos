@@ -184,39 +184,66 @@ def _msg(text: str) -> dict:
                         "date": 0, "from": {"id": OWNER}}}
 
 
-def test_barra_j_lista(bot):
+def _toque(dado: str) -> dict:
+    return {"update_id": 2, "callback_query": {
+        "id": "cb1", "data": dado, "from": {"id": OWNER},
+        "message": {"message_id": 5, "chat": {"id": OWNER}, "date": 0},
+    }}
+
+
+def _metodos(call) -> list[str]:
+    return [c.args[1] for c in call.call_args_list]
+
+
+def test_barra_j_lista_em_botoes(bot):
     with patch.object(telegram, "call") as call:
         bot.handle_update(_msg("/j"))
-    enviado = call.call_args[1]["text"]
-    assert "/j1" in enviado and "Promover capturas" in enviado
+    enviado = call.call_args[1]
+    assert "Promover capturas" in enviado["text"] and "/j1" not in enviado["text"]
+    dados = [b["callback_data"] for linha in enviado["reply_markup"]["inline_keyboard"] for b in linha]
+    assert "j:1" in dados
 
 
-def test_barra_j1_dispara(bot):
+def test_toque_no_job_pede_confirmacao_e_nao_dispara(bot):
+    """Botão é fácil de tocar sem querer; promover leva 20 min e custa API."""
+    with patch.object(telegram, "call") as call, patch.object(jobs, "disparar") as disparar:
+        bot.handle_update(_toque("j:1"))
+    disparar.assert_not_called()
+    assert "editMessageText" in _metodos(call)
+    edit = next(c for c in call.call_args_list if c.args[1] == "editMessageText").kwargs
+    assert "Rodar agora" in str(edit["reply_markup"])
+
+
+def test_confirmar_dispara(bot):
     with patch.object(telegram, "call") as call, patch.object(jobs, "disparar",
                                                               return_value="começou") as disparar:
-        bot.handle_update(_msg("/j1"))
+        bot.handle_update(_toque("jr:1"))
     disparar.assert_called_once()
     assert disparar.call_args[0][0].chave == "promover"
-    assert "começou" in call.call_args[1]["text"]
+    edit = next(c for c in call.call_args_list if c.args[1] == "editMessageText").kwargs
+    assert "começou" in edit["text"]
 
 
-def test_indice_inexistente(bot):
+def test_indice_inexistente_vira_aviso(bot):
     with patch.object(telegram, "call") as call:
-        bot.handle_update(_msg("/j9"))
-    assert "/j lista" in call.call_args[1]["text"]
+        bot.handle_update(_toque("jr:9"))
+    aviso = next(c for c in call.call_args_list if c.args[1] == "answerCallbackQuery").kwargs
+    assert "não existe" in aviso["text"]
+    assert "editMessageText" not in _metodos(call)
 
 
-def test_erro_de_job_vira_resposta(bot):
+def test_erro_de_job_vira_aviso(bot):
     with patch.object(telegram, "call") as call, patch.object(
         jobs, "disparar", side_effect=jobs.JobError("sem pwsh aqui")
     ):
-        bot.handle_update(_msg("/j1"))
-    assert "sem pwsh aqui" in call.call_args[1]["text"]
+        bot.handle_update(_toque("jr:1"))
+    aviso = next(c for c in call.call_args_list if c.args[1] == "answerCallbackQuery").kwargs
+    assert "sem pwsh aqui" in aviso["text"]
 
 
 def test_job_nao_toca_a_sessao_de_captura(bot):
     with patch.object(telegram, "call"), patch.object(jobs, "disparar", return_value="ok"):
-        bot.handle_update(_msg("/j1"))
+        bot.handle_update(_toque("jr:1"))
     assert bot.session is None
 
 

@@ -423,7 +423,7 @@ def test_polling_recupera_avanca_offset_e_publica_status(owner):
 
     assert "2026-09-13 10-00-00 tg 1" in _inbox()
     assert "offset" not in seen[0] and seen[1]["offset"] == 1010  # update_id 1009 + 1
-    assert seen[0]["allowed_updates"] == ["message"]
+    assert seen[0]["allowed_updates"] == ["message", "callback_query"]
     assert _staged() == ["2026-09-14 15-02-11 tg 9"]
     assert set_bot.call_args.args[0] == "polling"
     assert set_bot.call_args.kwargs["session"] == "2026-09-14 15-02-11 tg 9"
@@ -534,7 +534,7 @@ def test_ver_responde_em_html_sem_abrir_sessao(owner, api, vault_falso):
     [chamada] = api.call_args_list
     assert chamada.args[1] == "sendMessage"
     assert chamada.kwargs["parse_mode"] == "HTML"
-    assert "PPJ" in chamada.kwargs["text"]
+    assert "PPJ" in str(chamada.kwargs["reply_markup"])
 
 
 def test_consulta_escapa_o_conteudo_do_vault(owner, api, vault_falso):
@@ -585,15 +585,12 @@ def test_menu_cobre_todos_os_comandos_que_o_bot_entende(owner, api):
     """O que o bot atende e o menu não anuncia é comando que ele precisa lembrar sozinho.
 
     Os atalhos de uma letra e o /0 ficam fora do menu de propósito: o menu é para descobrir,
-    e nove linhas com sinônimo em metade delas descobre pior. Cada verbo anuncia o seu atalho
-    na descrição."""
+    e nove linhas com sinônimo em metade delas descobre pior."""
     nomes = {nome for nome, _ in telegram.MENU}
     verbos = set(telegram.CONSULTA_COMMANDS.values())
     assert set(telegram.PREFIX_COMMANDS) <= nomes
     assert verbos <= nomes
     assert {"nova"} <= nomes
-    for atalho in ("/0", "/v", "/b", "/h", "/n", "/a"):
-        assert any(atalho in descricao for _, descricao in telegram.MENU), atalho
     for nome, descricao in telegram.MENU:
         assert nome.islower() and nome.isascii() and 1 <= len(nome) <= 32
         assert 1 <= len(descricao) <= 256
@@ -620,29 +617,99 @@ def test_atalhos_de_uma_letra_valem(owner, api, vault_falso):
         assert api.call_args_list[0].kwargs["parse_mode"] == "HTML"
 
 
-def test_numero_da_resposta_anterior_abre_a_nota(owner, api, vault_falso):
-    """O contrato inteiro do desenho: o /p1 que apareceu na resposta funciona na seguinte."""
+def _toque(dado, chat=OWNER, message_id=50):
+    return {"update_id": 5000, "callback_query": {
+        "id": "cb", "data": dado, "from": {"id": chat},
+        "message": {"message_id": message_id, "chat": {"id": chat}, "date": DATE},
+    }}
+
+
+def _dados(kwargs):
+    return {b["text"]: b["callback_data"]
+            for linha in kwargs["reply_markup"]["inline_keyboard"] for b in linha}
+
+
+def _chamadas(api, metodo):
+    return [c.kwargs for c in api.call_args_list if c.args[1] == metodo]
+
+
+def test_toque_troca_a_propria_mensagem(owner, api, vault_falso):
+    """O contrato do desenho: tocar num botão troca a mensagem, não manda outra."""
     bot = Bot(TOKEN)
-    bot.handle_update(_update("/ver"))
-    assert "/p1" in api.call_args_list[0].kwargs["text"]
+    bot.handle_update(_update("/inicio"))
+    dados = _dados(api.call_args_list[0].kwargs)
+    [dado] = [d for rotulo, d in dados.items() if "PPJ" in rotulo]
     api.reset_mock()
-    bot.handle_update(_update("/p1", message_id=8))
-    assert "PPJ" in api.call_args_list[0].kwargs["text"]
+    bot.handle_update(_toque(dado))
+    [edit] = _chamadas(api, "editMessageText")
+    assert edit["message_id"] == 50 and "PPJ" in edit["text"] and edit["parse_mode"] == "HTML"
+    assert _chamadas(api, "answerCallbackQuery") and not _chamadas(api, "sendMessage")
+    assert bot.session is None
 
 
-def test_indice_sem_contexto_explica_em_vez_de_explodir(owner, api, vault_falso):
-    """Depois de um relançamento o bot nasce sem contexto; /p3 não pode virar exceção."""
-    Bot(TOKEN).handle_update(_update("/p3"))
-    texto = api.call_args_list[0].kwargs["text"]
-    assert "/ver" in texto and "parse_mode" not in api.call_args_list[0].kwargs
+def test_toque_de_outro_chat_e_ignorado(owner, api, vault_falso):
+    Bot(TOKEN).handle_update(_toque("i", chat=999))
+    assert api.call_count == 0
+
+
+def test_botao_vencido_vira_aviso_passageiro(owner, api, vault_falso):
+    """Depois de um relançamento o botão velho não casa com nada: avisa, não explode, e não
+    troca a tela por uma mensagem de erro."""
+    Bot(TOKEN).handle_update(_toque("o:dead.1"))
+    [aviso] = _chamadas(api, "answerCallbackQuery")
+    assert "reinício" in aviso["text"]
+    assert not _chamadas(api, "editMessageText")
+
+
+def test_tela_igual_nao_e_erro(owner, api, vault_falso):
+    """Tocar em Início estando no Início: a API responde 400 "not modified", e isso é normal."""
+    def fake(token, method, **kw):
+        if method == "editMessageText":
+            raise TelegramError("editMessageText: 400 Bad Request: message is not modified", code=400)
+        return {}
+    api.side_effect = fake
+    Bot(TOKEN).handle_update(_toque("i"))
+    assert len(_chamadas(api, "editMessageText")) == 1   # não degradou para texto cru
+
+
+def test_tela_longa_vai_como_mensagens_novas(owner, api, vault_falso, monkeypatch):
+    monkeypatch.setattr(vault_falso, "cmd_botao",
+                        lambda dado, ctx: vault_falso.Tela("linha\n" * 3000, [[vault_falso.INICIO]]))
+    Bot(TOKEN).handle_update(_toque("i"))
+    enviadas = _chamadas(api, "sendMessage")
+    assert len(enviadas) > 1 and not _chamadas(api, "editMessageText")
+    assert "reply_markup" in enviadas[-1] and "reply_markup" not in enviadas[0]
+
+
+def test_buscar_pelo_botao_pergunta_e_a_resposta_vira_busca(owner, api, vault_falso):
+    """A resposta ao "O que procurar?" é busca, não captura — sem isto o termo viraria nota."""
+    api.return_value = {"message_id": 77}
+    bot = Bot(TOKEN)
+    bot.handle_update(_toque("b"))
+    [pergunta] = _chamadas(api, "sendMessage")
+    assert pergunta["reply_markup"]["force_reply"] is True
+    api.reset_mock()
+    bot.handle_update(_update("reunião", message_id=78, reply_to_message={"message_id": 77}))
+    assert bot.session is None and list(config.INBOX_DIR.iterdir()) == []
+    assert "PPJ" in _chamadas(api, "sendMessage")[0]["text"]
+    # Respondida uma vez, a pergunta deixa de valer: responder de novo é captura, como sempre.
+    assert 77 not in bot.pedidos_busca
+
+
+def test_barra_buscar_sem_termo_pergunta(owner, api, vault_falso):
+    api.return_value = {"message_id": 77}
+    bot = Bot(TOKEN)
+    bot.handle_update(_update("/buscar"))
+    assert _chamadas(api, "sendMessage")[0]["reply_markup"]["force_reply"] is True
+    assert 77 in bot.pedidos_busca
 
 
 def test_cada_bot_tem_o_seu_contexto(owner, api, vault_falso):
     assert Bot(TOKEN).contexto is not Bot(TOKEN).contexto
 
 
-def test_indice_nao_confunde_com_captura(owner, api, vault_falso, downloads):
-    """'/p1' é consulta; 'p1' sem barra é texto e tem de virar nota."""
+def test_texto_parecido_com_comando_e_captura(owner, api, vault_falso, downloads):
+    """'p1' sem barra é texto e tem de virar nota."""
     bot = Bot(TOKEN)
     bot.handle_update(_update("p1"))
     assert bot.session is not None
@@ -658,7 +725,7 @@ def test_comando_parecido_com_indice_mas_invalido_cai_na_ajuda(owner, api, vault
 def test_ajuda_anuncia_os_comandos_de_consulta(owner, api, vault_falso):
     Bot(TOKEN).handle_update(_update("/ajuda"))
     texto = api.call_args_list[0].kwargs["text"]
-    for esperado in ("/0", "/ver", "/buscar", "/hoje", "/p1", "/s1", "/r1", "/tarefa"):
+    for esperado in ("/inicio", "/ver", "/buscar", "/hoje", "/tarefa"):
         assert esperado in texto, esperado
 
 

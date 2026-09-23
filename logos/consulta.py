@@ -24,7 +24,9 @@ A formatação sai em HTML da Bot API (`parse_mode="HTML"`), e só por este cami
 import html
 import logging
 import re
+import secrets
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -471,18 +473,23 @@ def buscar(termo: str) -> list[tuple[Path, list[tuple[int, str]]]]:
 # `_PICTOGRAMAS`, porque o emoji do template herdado não marca coisa nenhuma.
 MARCA_PROJETO = "\U0001f4c1"
 MARCA_NOTA = "\U0001f4c4"
-MARCA_SECAO = "\u25b8"
+MARCA_SECAO = "▸"
 MARCA_BUSCA = "\U0001f50e"
-MARCA_BRIEFING = "\u2600\ufe0f"
+MARCA_BRIEFING = "☀️"
 MARCA_DICA = "\U0001f4a1"
-MARCA_NADA = "\u2205"
+MARCA_NADA = "∅"
 MARCA_INICIO = "\U0001f9ed"
 MARCA_JOB = "⚙️"
 MARCA_PASTA = "\U0001f4c2"
 MARCA_LINK = "↪"
+MARCA_CITADA = "↩"
+MARCA_VOLTA = "⬅"
 
 MAX_ATALHOS_INICIO = 5
 MAX_NOTAS_PASTA = 15
+MAX_ROTULO = 40        # o app corta o texto do botão; melhor cortar aqui, com reticências
+MAX_ROTULO_PAR = 22    # botão que divide a linha com outro
+MAX_LIGACOES_NA_NOTA = 4
 
 LIMITE_CITACAO = 700   # acima disso a citação nasce recolhida, com um toque para expandir
 
@@ -505,7 +512,7 @@ def _data(path: Path) -> str:
 
 def _cortar(text: str, limite: int = MAX_LINHA) -> str:
     text = text.strip()
-    return text if len(text) <= limite else text[: limite - 1].rstrip() + "\u2026"
+    return text if len(text) <= limite else text[: limite - 1].rstrip() + "…"
 
 
 def _quebrar_linha(linha: str, limite: int) -> list[str]:
@@ -576,106 +583,169 @@ def _meta_linha(nota: Nota) -> str:
     campos = [nota.meta.get(c) for c in ("status", "quarter")]
     campos = [c for c in campos if c]
     campos.append(f"atualizada {nota.atualizada.strftime('%d/%m')}")
-    return " \u00b7 ".join(campos)
+    return " · ".join(campos)
 
 
 def dica(*sugestoes: str) -> str:
-    """Rodapé com o próximo passo. Toda resposta tem um: é assim que ele aprende o vocabulário
-    sem nunca ler a ajuda."""
-    return f"\n{MARCA_DICA} " + "  \u00b7  ".join(s for s in sugestoes if s)
+    """Rodapé de uma linha, para o que botão não resolve (o aviso de que o job terminou chega
+    depois, por exemplo)."""
+    return f"\n{MARCA_DICA} " + "  ·  ".join(s for s in sugestoes if s)
 
 
 # ---------------------------------------------------------------------------
-# Contexto: o que faz /p1, /s2 e /r3 significarem alguma coisa
+# Telas: o texto e os botões embaixo dele
+# ---------------------------------------------------------------------------
+
+# (rótulo, dado). O dado é o que o Telegram devolve quando ele toca — até 64 bytes. Ver
+# `cmd_botao` para o vocabulário.
+Botao = tuple[str, str]
+
+INICIO: Botao = (f"{MARCA_INICIO} Início", "i")
+BUSCAR: Botao = (f"{MARCA_BUSCA} Buscar", "b")
+
+
+@dataclass
+class Tela:
+    """Uma resposta da consulta.
+
+    Os botões substituíram os `/p3`, `/s2`, `/r1` de antes. O número-comando resolvia "o
+    próximo passo está na tela", mas pedia leitura: achar o número, lembrar a letra, digitar.
+    Ele achou cansativo e feio (22/09/2026). O botão mantém a ideia — o próximo passo está na
+    tela — e tira a leitura: é só tocar."""
+    texto: str
+    botoes: list[list[Botao]] = field(default_factory=list)
+
+
+def _rotulo(texto: str, limite: int = MAX_ROTULO) -> str:
+    return _cortar(_sem_emoji(texto) or texto, limite)
+
+
+def _em_pares(botoes: list[Botao]) -> list[list[Botao]]:
+    """Dois por linha: seção e link têm nome curto, e uma coluna só empurraria a navegação
+    para fora da tela."""
+    return [botoes[i:i + 2] for i in range(0, len(botoes), 2)]
+
+
+def _marca(path: Path) -> str:
+    """Briefing tem marca própria. Sai do caminho, não de quem abriu: o botão de voltar ao
+    índice não sabe se a nota veio do /hoje."""
+    try:
+        path.resolve().relative_to(vault_root() / "briefings")
+        return MARCA_BRIEFING
+    except ValueError:
+        return MARCA_NOTA
+
+
+# ---------------------------------------------------------------------------
+# Contexto: liga cada botão a uma nota ou pasta
 # ---------------------------------------------------------------------------
 
 class Contexto:
-    """Memória curta do chat: a última lista de projetos, a nota aberta e a última busca.
+    """Dá a cada caminho mostrado um código curto; o botão carrega o código.
 
-    Em memória e sem persistência, de propósito: o bot é de uma pessoa só, e um índice que
-    sobrevive a um relançamento é pior que nenhum — apontaria para outra nota sem avisar. Depois
-    de uma queda, `/p3` responde que a lista venceu."""
+    Por que não o número da lista, como no `/p3`: com botões, a mensagem antiga continua na
+    tela e continua tocável. "O terceiro da última lista" abriria outra nota sem avisar. O código
+    é do caminho, então um botão antigo abre sempre a mesma nota.
+
+    Em memória e com uma geração aleatória por processo, de propósito: depois de um relançamento
+    os códigos recomeçam, e sem a geração o botão velho `o:3` abriria a nota que ganhou o 3 no
+    processo novo. Com ela, o botão velho não casa com nada e diz que venceu."""
 
     def __init__(self) -> None:
-        self.projetos: list[Path] = []
-        self.resultados: list[Path] = []
-        self.nota: Path | None = None
-        self.secoes: list[str] = []
-        # A marca vem junto porque o /s0 reabre a nota: sem ela, o índice do briefing
-        # voltaria com a marca de nota e o marcador deixaria de significar o que significa.
-        self.marca: str = MARCA_NOTA
-        self.pastas: list[Path] = []
-        self.pasta: Path | None = None     # a última pasta aberta, para o /d0 voltar a ela
-        self.links: list[Path] = []
+        self.geracao = secrets.token_hex(2)
+        self._caminhos: dict[str, Path] = {}
+        self._codigos: dict[Path, str] = {}
 
-    def lembrar_projetos(self, notas: list[Path]) -> None:
-        self.projetos = list(notas)
+    def ref(self, path: Path) -> str:
+        chave = path.resolve()
+        codigo = self._codigos.get(chave)
+        if codigo is None:
+            codigo = f"{self.geracao}.{len(self._codigos) + 1:x}"
+            self._codigos[chave] = codigo
+            self._caminhos[codigo] = chave
+        return codigo
 
-    def lembrar_resultados(self, notas: list[Path]) -> None:
-        self.resultados = list(notas)
-
-    def lembrar_pastas(self, pastas: list[Path], aberta: Path | None = None) -> None:
-        self.pastas = list(pastas)
-        self.pasta = aberta
-
-    def lembrar_nota(self, nota: "Nota", marca: str = MARCA_NOTA,
-                     links: list[Path] | None = None) -> None:
-        """`links=None` mantém os de antes: abrir uma seção não muda os links da nota."""
-        self.nota = nota.path
-        self.secoes = [titulo for titulo, _ in nota.secoes]
-        self.marca = marca
-        if links is not None:
-            self.links = list(links)
-
-    def escolher(self, letra: str, numero: int) -> Path:
-        lista = {"p": self.projetos, "r": self.resultados, "d": self.pastas, "l": self.links}[letra]
-        rotulo, refazer = {
-            "p": ("lista de projetos", "Mande /ver de novo."),
-            "r": ("lista", "Mande /buscar ou /pastas de novo."),
-            "d": ("lista de pastas", "Mande /pastas de novo."),
-            "l": ("lista de links", "Abra uma nota com /ver."),
-        }[letra]
-        if not lista:
-            raise ConsultaError(f"Não tenho essa {rotulo} aqui. {refazer}")
-        if not 1 <= numero <= len(lista):
-            raise ConsultaError(f"A {rotulo} tem {len(lista)} itens, e você pediu o {numero}.")
-        return lista[numero - 1]
+    def caminho(self, codigo: str) -> Path:
+        path = self._caminhos.get(codigo)
+        if path is None:
+            raise ConsultaError("Esse botão é de antes do último reinício do Logos. Toque em Início.")
+        return path
 
 
 # ---------------------------------------------------------------------------
 # Renderização
 # ---------------------------------------------------------------------------
 
-def render_projetos(notas: list[Path]) -> str:
+def _botao_nota(path: Path, ctx: Contexto, marca: str = MARCA_NOTA, data: bool = True,
+                limite: int = MAX_ROTULO) -> Botao:
+    sufixo = f" · {_data(path)}" if data else ""
+    return (f"{marca} {_rotulo(path.stem, limite - len(sufixo))}{sufixo}", f"o:{ctx.ref(path)}")
+
+
+def _botao_pasta(pasta: Path, ctx: Contexto, nome: str | None = None) -> Botao:
+    return (f"{MARCA_PASTA} {_rotulo(nome or pasta.name)} · {_contar(pasta)}", f"d:{ctx.ref(pasta)}")
+
+
+def _voltar(path: Path, ctx: Contexto) -> Botao:
+    """Volta sempre para a pasta de cima, venha de onde vier: previsível vale mais do que
+    lembrar o caminho percorrido. A raiz de cada pasta legível volta para a lista de pastas."""
+    pasta = path.parent
+    if not _is_allowed(pasta):
+        return (f"{MARCA_VOLTA} Pastas", "n")
+    return (f"{MARCA_VOLTA} {_rotulo(rel(pasta), MAX_ROTULO_PAR)}", f"d:{ctx.ref(pasta)}")
+
+
+def render_projetos(notas: list[Path], ctx: Contexto) -> Tela:
     if not notas:
-        return f"{MARCA_NADA} Nenhum projeto ativo em <code>work/active</code>."
-    linhas = [f"{MARCA_PROJETO} <b>Projetos ativos</b>", ""]
-    for indice, path in enumerate(notas[:MAX_PROJETOS], 1):
-        linhas.append(f"/p{indice}  <b>{esc(path.stem)}</b>  <i>{_data(path)}</i>")
-    return "\n".join(linhas) + dica("/p1 abre o primeiro", "/buscar termo", "/ajuda")
+        return Tela(f"{MARCA_NADA} Nenhum projeto ativo em <code>work/active</code>.", [[INICIO]])
+    botoes = [[_botao_nota(p, ctx, MARCA_PROJETO)] for p in notas[:MAX_PROJETOS]]
+    return Tela(f"{MARCA_PROJETO} <b>Projetos ativos</b>", botoes + [[BUSCAR, INICIO]])
 
 
-def _render_ligacoes(saem: list[Path], entram: list[Path]) -> list[str]:
-    """Os links viram `/l1`, `/l2`… numa numeração só: quem lê não precisa saber de que lado
-    o link está para segui-lo, só que dá para seguir."""
-    linhas: list[str] = []
-    indice = 0
-    for titulo, notas in (("Links", saem), ("Citada em", entram)):
-        if not notas:
-            continue
-        linhas += ["", f"<b>{titulo}</b>"]
-        for path in notas:
-            indice += 1
-            linhas.append(f"/l{indice}  {MARCA_LINK} {esc(path.stem)}")
-    return linhas
+def _botoes_ligacoes(saem: list[Path], entram: list[Path], ctx: Contexto,
+                     limite: int = MAX_ROTULO_PAR) -> list[Botao]:
+    """Os links que saem com ↪, as notas que citam esta com ↩. Mesma ação nos dois: quem lê
+    não precisa saber de que lado o link está para segui-lo."""
+    botoes = [(f"{MARCA_LINK} {_rotulo(p.stem, limite)}", f"o:{ctx.ref(p)}") for p in saem]
+    botoes += [(f"{MARCA_CITADA} {_rotulo(p.stem, limite)}", f"o:{ctx.ref(p)}") for p in entram]
+    return botoes
 
 
-def render_nota(nota: Nota, marca: str = MARCA_NOTA, saem: list[Path] | None = None,
-                entram: list[Path] | None = None, volta: str = "/ver volta aos projetos") -> str:
+def _ligacoes_na_nota(nota: Nota, saem: list[Path], entram: list[Path], ctx: Contexto) -> list[list[Botao]]:
+    """Poucas ligações vão direto na nota. Muitas viram um botão só: a nota do Logos tem vinte,
+    e vinte botões de nome cortado empurravam as seções para fora da tela."""
+    total = len(saem) + len(entram)
+    if total <= MAX_LIGACOES_NA_NOTA:
+        return _em_pares(_botoes_ligacoes(saem, entram, ctx))
+    return [[(f"{MARCA_LINK} Ligações ({total})", f"l:{ctx.ref(nota.path)}")]]
+
+
+def render_ligacoes(nota: Nota, saem: list[Path], entram: list[Path], ctx: Contexto) -> Tela:
+    """Uma por linha, com o nome inteiro: aqui não há seção disputando espaço."""
+    texto = (f"{MARCA_LINK} <b>Ligações de {esc(nota.titulo)}</b>\n"
+             f"<i>{MARCA_LINK} para onde ela aponta  ·  {MARCA_CITADA} quem a cita</i>")
+    botoes = [[b] for b in _botoes_ligacoes(saem, entram, ctx, MAX_ROTULO)]
+    volta = (f"{MARCA_VOLTA} {_rotulo(nota.titulo, MAX_ROTULO_PAR)}", f"o:{ctx.ref(nota.path)}")
+    return Tela(texto, botoes + [[volta, INICIO]])
+
+
+def _linha_ligacoes(saem: list[Path], entram: list[Path]) -> str:
+    partes = []
+    if saem:
+        partes.append(f"{MARCA_LINK} {len(saem)} link(s)")
+    if entram:
+        partes.append(f"{MARCA_CITADA} citada em {len(entram)}")
+    return "<i>" + "  ·  ".join(partes) + "</i>" if partes else ""
+
+
+def render_nota(nota: Nota, ctx: Contexto, saem: list[Path] | None = None,
+                entram: list[Path] | None = None) -> Tela:
+    saem, entram = saem or [], entram or []
+    marca = _marca(nota.path)
     cabeca = [f"{marca} <b>{esc(nota.titulo)}</b>", f"<i>{esc(_meta_linha(nota))}</i>"]
-    descricao = nota.meta.get("description")
-    ligacoes_ = _render_ligacoes(saem or [], entram or [])
-    seguir = "/l1 segue o primeiro link" if ligacoes_ else ""
+    ligacoes_ = _ligacoes_na_nota(nota, saem, entram, ctx)
+    rodape = [_linha_ligacoes(saem, entram)] if ligacoes_ else []
+    navegar = [[_voltar(nota.path, ctx), INICIO]]
 
     inteira = "\n\n".join(
         [nota.intro] + [f"{titulo}\n{_corpo(linhas)}" for titulo, linhas in nota.secoes]
@@ -683,22 +753,26 @@ def render_nota(nota: Nota, marca: str = MARCA_NOTA, saem: list[Path] | None = N
 
     if len(inteira) <= LIMITE_NOTA_INTEIRA:
         corpo = citacao(esc(inteira)) if inteira else "<i>Nota sem conteúdo além do frontmatter.</i>"
-        return "\n".join(cabeca + ["", corpo] + ligacoes_) + dica(seguir, volta, "/ajuda")
+        texto = "\n".join(cabeca + ["", corpo] + ([""] + rodape if rodape else []))
+        return Tela(texto, ligacoes_ + navegar)
 
-    # Nota longa: as seções viram comandos. Ninguém lê 14 KB de uma vez no celular, e digitar
-    # o nome da seção seria pior do que rolar a nota no Obsidian.
+    # Nota longa: as seções viram botões. Ninguém lê 14 KB de uma vez no celular.
     partes = list(cabeca)
+    descricao = nota.meta.get("description")
     if descricao:
         partes += ["", citacao(esc(_cortar(descricao, 400)), expansivel=False)]
     elif nota.intro:
         partes += ["", citacao(esc(_cortar(nota.intro, 400)), expansivel=False)]
-    partes += ["", f"<b>{len(nota.secoes)} seções</b>"]
-    for indice, (titulo, _) in enumerate(nota.secoes, 1):
-        partes.append(f"/s{indice}  {MARCA_SECAO} {esc(titulo)}")
-    return "\n".join(partes + ligacoes_) + dica("/s1 abre a primeira", seguir, volta)
+    partes += ["", f"<b>{len(nota.secoes)} seções</b> — toque para abrir"] + rodape
+    ref = ctx.ref(nota.path)
+    secoes = _em_pares([
+        (f"{MARCA_SECAO} {_rotulo(titulo, MAX_ROTULO_PAR)}", f"s:{ref}:{indice}")
+        for indice, (titulo, _) in enumerate(nota.secoes, 1)
+    ])
+    return Tela("\n".join(partes), secoes + ligacoes_ + navegar)
 
 
-def render_secao(nota: Nota, indice: int) -> str:
+def render_secao(nota: Nota, indice: int, ctx: Contexto) -> Tela:
     if not nota.secoes:
         raise ConsultaError(f"{nota.titulo} não tem seções. A nota inteira já veio acima.")
     if not 1 <= indice <= len(nota.secoes):
@@ -707,39 +781,17 @@ def render_secao(nota: Nota, indice: int) -> str:
     corpo = _corpo(linhas) or "Seção vazia."
     cabeca = (
         f"{MARCA_SECAO} <b>{esc(titulo)}</b>\n"
-        f"<i>{esc(nota.titulo)} \u00b7 {indice} de {len(nota.secoes)}</i>"
+        f"<i>{esc(nota.titulo)} · {indice} de {len(nota.secoes)}</i>"
     )
+    ref = ctx.ref(nota.path)
     vizinhas = []
-    if indice < len(nota.secoes):
-        vizinhas.append(f"/s{indice + 1} {esc(nota.secoes[indice][0])}")
     if indice > 1:
-        vizinhas.append(f"/s{indice - 1} anterior")
-    vizinhas.append("/s0 índice")
-    return f"{cabeca}\n\n{citacao(esc(corpo))}" + dica(*vizinhas)
-
-
-def render_busca(termo: str, achados: list[tuple[Path, list[tuple[int, str]]]]) -> str:
-    if not achados:
-        return (
-            f"{MARCA_NADA} Nada com <b>{esc(termo)}</b> nas notas que eu leio."
-            + dica("/ver lista os projetos", "/ajuda")
-        )
-    partes = [f"{MARCA_BUSCA} <b>{esc(termo)}</b> \u2014 {len(achados)} arquivo(s)", ""]
-    for indice, (path, linhas) in enumerate(achados, 1):
-        partes.append(f"/r{indice}  <b>{esc(path.stem)}</b>  <i>{esc(_pasta(path))}</i>")
-        trecho = "\n".join(esc(_cortar(linha)) for _, linha in linhas)
-        partes.append(citacao(trecho))
-        partes.append("")
-    return "\n".join(partes).rstrip() + dica("/r1 abre o primeiro", "/ver lista os projetos")
-
-
-def render_ambiguo(nome: str, candidatos: list[Path]) -> str:
-    partes = [f"<b>{esc(nome)}</b> casa com mais de uma nota:", ""]
-    for indice, path in enumerate(candidatos[:10], 1):
-        partes.append(f"/r{indice}  <b>{esc(path.stem)}</b>  <i>{esc(_pasta(path))}</i>")
-    if len(candidatos) > 10:
-        partes.append(f"<i>\u2026 e mais {len(candidatos) - 10}.</i>")
-    return "\n".join(partes) + dica("/r1 abre o primeiro")
+        vizinhas.append(("‹ Anterior", f"s:{ref}:{indice - 1}"))
+    if indice < len(nota.secoes):
+        vizinhas.append((f"{_rotulo(nota.secoes[indice][0], MAX_ROTULO_PAR)} ›", f"s:{ref}:{indice + 1}"))
+    botoes = [vizinhas] if vizinhas else []
+    botoes.append([(f"{MARCA_VOLTA} Índice", f"s:{ref}:0"), INICIO])
+    return Tela(f"{cabeca}\n\n{citacao(esc(corpo))}", botoes)
 
 
 def _pasta(path: Path) -> str:
@@ -747,127 +799,122 @@ def _pasta(path: Path) -> str:
     return caminho.rsplit("/", 1)[0] if "/" in caminho else caminho
 
 
-def render_pastas(raizes: list[Path]) -> str:
+def render_busca(termo: str, achados: list[tuple[Path, list[tuple[int, str]]]], ctx: Contexto) -> Tela:
+    if not achados:
+        return Tela(
+            f"{MARCA_NADA} Nada com <b>{esc(termo)}</b> nas notas que eu leio.",
+            [[(f"{MARCA_BUSCA} Outra busca", "b"), INICIO]],
+        )
+    partes = [f"{MARCA_BUSCA} <b>{esc(termo)}</b> — {len(achados)} arquivo(s)", ""]
+    botoes = []
+    for indice, (path, linhas) in enumerate(achados, 1):
+        partes.append(f"<b>{indice}. {esc(path.stem)}</b>  <i>{esc(_pasta(path))}</i>")
+        trecho = "\n".join(esc(_cortar(linha)) for _, linha in linhas)
+        partes.append(citacao(trecho))
+        partes.append("")
+        botoes.append((f"{indice}. {_rotulo(path.stem, MAX_ROTULO_PAR)}", f"o:{ctx.ref(path)}"))
+    return Tela("\n".join(partes).rstrip(), _em_pares(botoes) + [[(f"{MARCA_BUSCA} Outra busca", "b"), INICIO]])
+
+
+def render_ambiguo(nome: str, candidatos: list[Path], ctx: Contexto) -> Tela:
+    texto = f"<b>{esc(nome)}</b> casa com mais de uma nota:"
+    if len(candidatos) > 10:
+        texto += f"\n<i>Mostrando 10 de {len(candidatos)}. Um nome mais comprido estreita.</i>"
+    botoes = [
+        [(f"{MARCA_NOTA} {_rotulo(p.stem)} · {_rotulo(_pasta(p), MAX_ROTULO_PAR)}", f"o:{ctx.ref(p)}")]
+        for p in candidatos[:10]
+    ]
+    return Tela(texto, botoes + [[INICIO]])
+
+
+def render_pastas(raizes: list[Path], ctx: Contexto) -> Tela:
     if not raizes:
-        return f"{MARCA_NADA} Nenhuma das pastas que eu leio existe neste vault."
-    linhas = [f"{MARCA_PASTA} <b>Pastas que eu leio</b>", ""]
-    for indice, pasta in enumerate(raizes, 1):
-        linhas.append(f"/d{indice}  <b>{esc(rel(pasta))}</b>  <i>{_contar(pasta)} notas</i>")
-    return "\n".join(linhas) + dica("/d1 abre a primeira", "/b termo procura em todas")
+        return Tela(f"{MARCA_NADA} Nenhuma das pastas que eu leio existe neste vault.", [[INICIO]])
+    botoes = [[_botao_pasta(p, ctx, rel(p))] for p in raizes]
+    return Tela(f"{MARCA_PASTA} <b>Pastas que eu leio</b>", botoes + [[BUSCAR, INICIO]])
 
 
-def render_pasta(pasta: Path, subpastas: list[Path], notas: list[Path]) -> str:
-    """Subpastas como `/d`, notas como `/r`. Pasta grande mostra só as mais recentes: rolar
-    trinta capturas no celular é pior que procurar, então o rodapé aponta para a busca."""
-    partes = [f"{MARCA_PASTA} <b>{esc(rel(pasta))}</b>", ""]
-    for indice, sub in enumerate(subpastas, 1):
-        partes.append(f"/d{indice}  {MARCA_PASTA} <b>{esc(sub.name)}</b>  <i>{_contar(sub)} notas</i>")
-    if subpastas and notas:
-        partes.append("")
-    for indice, path in enumerate(notas[:MAX_NOTAS_PASTA], 1):
-        partes.append(f"/r{indice}  {MARCA_NOTA} {esc(path.stem)}  <i>{_data(path)}</i>")
+def render_pasta(pasta: Path, subpastas: list[Path], notas: list[Path], ctx: Contexto) -> Tela:
+    """Pasta grande mostra só as notas mais recentes: rolar trinta capturas no celular é pior
+    que procurar, então o texto aponta para a busca."""
+    linhas = [f"{MARCA_PASTA} <b>{esc(rel(pasta))}</b>"]
     if len(notas) > MAX_NOTAS_PASTA:
-        partes.append(f"<i>… e mais {len(notas) - MAX_NOTAS_PASTA} mais antigas; /b procura nelas.</i>")
+        linhas.append(f"<i>As {MAX_NOTAS_PASTA} mais recentes; as outras {len(notas) - MAX_NOTAS_PASTA} "
+                      "aparecem pela busca.</i>")
     if not subpastas and not notas:
-        partes.append("<i>Pasta vazia.</i>")
-    abrir = "/r1 abre a mais recente" if notas else "/d1 entra na primeira"
-    return "\n".join(partes) + dica(abrir, "/pastas volta ao topo")
+        linhas.append("<i>Pasta vazia.</i>")
+    botoes = _em_pares([_botao_pasta(sub, ctx) for sub in subpastas])
+    botoes += [[_botao_nota(p, ctx)] for p in notas[:MAX_NOTAS_PASTA]]
+    botoes.append([_voltar(pasta, ctx), INICIO])
+    return Tela("\n".join(linhas), botoes)
 
 
-def render_inicio(notas: list[Path], briefing: Path | None) -> str:
-    """Tela inicial do `/0`: para onde ir, com os atalhos já carregados.
-
-    Não pergunta e espera resposta — mostra as saídas possíveis já numeradas, que é mais rápido
-    do que perguntar. Os `/pN` daqui valem na hora, porque o contexto foi preenchido junto."""
-    partes = [f"{MARCA_INICIO} <b>Para onde?</b>", ""]
-    if notas:
-        partes.append(f"{MARCA_PROJETO} <b>Projetos</b>")
-        for indice, path in enumerate(notas[:MAX_ATALHOS_INICIO], 1):
-            partes.append(f"/p{indice}  {esc(path.stem)}  <i>{_data(path)}</i>")
-        if len(notas) > MAX_ATALHOS_INICIO:
-            partes.append(f"/v  <i>e mais {len(notas) - MAX_ATALHOS_INICIO}</i>")
-        partes.append("")
+def render_inicio(notas: list[Path], briefing: Path | None, ctx: Contexto) -> Tela:
+    """A tela do /inicio: as saídas possíveis já como botões, com os projetos mais mexidos na
+    frente — é por onde ele quase sempre começa."""
+    texto = (
+        f"{MARCA_INICIO} <b>Para onde?</b>\n"
+        "<i>Para capturar, é só mandar texto, voz ou foto.</i>"
+    )
+    botoes = [[_botao_nota(p, ctx, MARCA_PROJETO)] for p in notas[:MAX_ATALHOS_INICIO]]
+    if len(notas) > MAX_ATALHOS_INICIO:
+        botoes.append([(f"{MARCA_PROJETO} Todos os projetos ({len(notas)})", "v")])
+    linha = []
     if briefing is not None:
-        partes.append(f"{MARCA_BRIEFING} /h  <b>Briefing</b>  <i>{_data(briefing)}</i>")
-    partes.append(f"{MARCA_PASTA} /n  <b>Navegar</b> pelas pastas")
-    partes.append(f"{MARCA_BUSCA} /b &lt;termo&gt;  <b>Procurar</b> em tudo que eu leio")
-    partes.append(f"{MARCA_JOB} /j  <b>Rodar um job</b> no PC")
-    return "\n".join(partes) + dica("/a explica o resto", "ou mande texto/voz para capturar")
+        linha.append((f"{MARCA_BRIEFING} Briefing {_data(briefing)}", "h"))
+    linha.append((f"{MARCA_PASTA} Pastas", "n"))
+    botoes.append(linha)
+    botoes.append([BUSCAR, (f"{MARCA_JOB} Rodar no PC", "j")])
+    botoes.append([("Ajuda", "a")])
+    return Tela(texto, botoes)
 
 
-def render_ajuda() -> str:
-    """Uma tela. É o único texto que ele vai ler para aprender o bot inteiro."""
-    return (
+def render_ajuda() -> Tela:
+    """Uma tela curta: com botões, quase nada precisa ser explicado."""
+    texto = (
         f"{MARCA_DICA} <b>Como mexer aqui</b>\n"
         "\n"
-        f"{MARCA_INICIO} <code>/0</code> \u2014 na dúvida, sempre este. Mostra para onde ir.\n"
+        f"<b>Consultar:</b> /inicio e depois só botões. Tocar num botão troca esta mesma "
+        f"mensagem; {MARCA_VOLTA} volta um nível e {MARCA_INICIO} recomeça.\n"
         "\n"
-        "<b>Consultar</b> \u2014 um verbo e um alvo:\n"
-        "<code>/ver</code> projetos ativos\n"
-        "<code>/ver ppj</code> abre uma nota\n"
+        "<b>Atalhos digitados</b>, se preferir:\n"
+        "<code>/ver ppj</code> abre uma nota pelo nome\n"
         "<code>/buscar renato</code> procura nas notas\n"
         "<code>/hoje</code> o briefing mais recente\n"
-        "<code>/pastas</code> navega pelas pastas do vault\n"
-        "\n"
-        "<b>Os números das respostas são comandos.</b> Toque ou digite:\n"
-        f"{MARCA_PROJETO} <code>/p1</code> projeto da lista\n"
-        f"{MARCA_SECAO} <code>/s1</code> seção da nota aberta  \u00b7  <code>/s0</code> índice\n"
-        f"{MARCA_BUSCA} <code>/r1</code> resultado da busca ou nota da pasta\n"
-        f"{MARCA_PASTA} <code>/d1</code> pasta  ·  <code>/d0</code> volta à pasta aberta\n"
-        f"{MARCA_LINK} <code>/l1</code> segue um link da nota aberta\n"
-        "\n"
-        f"{MARCA_JOB} <code>/j</code> roda um job no PC (promover, reuniões, briefing)\n"
-        "\n"
-        "<b>Atalhos de uma letra:</b> <code>/v</code> <code>/b</code> <code>/h</code> "
-        "<code>/n</code> <code>/a</code>\n"
-        "\n"
-        "<b>Um fluxo inteiro:</b>\n"
-        "<code>/0</code> \u2192 <code>/p1</code> \u2192 <code>/s3</code>\n"
-        "<code>/n</code> \u2192 <code>/d2</code> \u2192 <code>/r1</code> \u2192 <code>/l1</code>\n"
         "\n"
         "<b>Capturar</b> segue igual: mande texto, voz, foto, PDF ou link.\n"
         "<code>/tarefa</code> <code>/ideia</code> <code>/planejamento</code> "
-        "<code>/diario</code>  \u00b7  <code>/nova</code> fecha a sessão."
+        "<code>/diario</code>  ·  <code>/nova</code> fecha a sessão."
     )
+    return Tela(texto, [[INICIO]])
 
 
 # ---------------------------------------------------------------------------
 # Comandos (o bot só despacha; a lógica e as mensagens moram aqui)
 # ---------------------------------------------------------------------------
 
-def _abrir(path: Path, ctx: Contexto, marca: str = MARCA_NOTA) -> str:
-    return _mostrar(carregar(path), ctx, marca)
+def _abrir(path: Path, ctx: Contexto) -> Tela:
+    return _mostrar(carregar(path), ctx)
 
 
-def _mostrar(nota: Nota, ctx: Contexto, marca: str) -> str:
-    """Nota com os links já numerados. O rodapé volta para onde ele veio: a pasta, se a nota
-    foi aberta de dentro dela, senão os projetos."""
+def _mostrar(nota: Nota, ctx: Contexto) -> Tela:
     saem, entram = ligacoes(nota.path)
-    ctx.lembrar_nota(nota, marca, saem + entram)
-    veio_da_pasta = ctx.pasta is not None and nota.path.resolve().parent == ctx.pasta.resolve()
-    volta = "/d0 volta à pasta" if veio_da_pasta else "/ver volta aos projetos"
-    return render_nota(nota, marca, saem, entram, volta)
+    return render_nota(nota, ctx, saem, entram)
 
 
-def _abrir_pasta(pasta: Path, ctx: Contexto) -> str:
+def _abrir_pasta(pasta: Path, ctx: Contexto) -> Tela:
     subpastas, notas = conteudo_pasta(pasta)
-    ctx.lembrar_pastas(subpastas, aberta=pasta)
-    ctx.lembrar_resultados(notas[:MAX_NOTAS_PASTA])
-    return render_pasta(pasta, subpastas, notas)
+    return render_pasta(pasta, subpastas, notas, ctx)
 
 
-def cmd_pastas(ctx: Contexto) -> str:
-    raizes = allowed_roots()
-    ctx.lembrar_pastas(raizes)
-    return render_pastas(raizes)
+def cmd_pastas(ctx: Contexto) -> Tela:
+    return render_pastas(allowed_roots(), ctx)
 
 
-def cmd_ver(argumento: str, ctx: Contexto) -> str:
+def cmd_ver(argumento: str, ctx: Contexto) -> Tela:
     argumento = (argumento or "").strip()
     if not argumento:
-        lista = projetos()
-        ctx.lembrar_projetos(lista)
-        return render_projetos(lista)
+        return render_projetos(projetos(), ctx)
 
     nome, indice = argumento, None
     partes = argumento.rsplit(maxsplit=1)
@@ -876,63 +923,70 @@ def cmd_ver(argumento: str, ctx: Contexto) -> str:
 
     candidatos = resolver(nome)
     if not candidatos:
-        return (
-            f"{MARCA_NADA} Não achei nota com <b>{esc(nome)}</b>."
-            + dica("/ver lista os projetos", "/buscar " + esc(nome))
-        )
+        botoes = [[(f"{MARCA_BUSCA} Buscar “{_rotulo(nome, MAX_ROTULO_PAR)}”", f"q:{nome}")]]
+        if len(botoes[0][0][1].encode("utf-8")) > 64:
+            botoes = [[BUSCAR]]
+        return Tela(f"{MARCA_NADA} Não achei nota com <b>{esc(nome)}</b>.", botoes + [[INICIO]])
     if len(candidatos) > 1:
-        ctx.lembrar_resultados(candidatos)
-        return render_ambiguo(nome, candidatos)
+        return render_ambiguo(nome, candidatos, ctx)
 
     if indice is None:
         return _abrir(candidatos[0], ctx)
-    nota = carregar(candidatos[0])
-    saem, entram = ligacoes(nota.path)
-    ctx.lembrar_nota(nota, links=saem + entram)
-    return render_secao(nota, indice)
+    return render_secao(carregar(candidatos[0]), indice, ctx)
 
 
-def cmd_buscar(termo: str, ctx: Contexto) -> str:
+def cmd_buscar(termo: str, ctx: Contexto) -> Tela:
     termo = (termo or "").strip()
-    if not termo:
-        return "Uso: <code>/buscar &lt;termo&gt;</code>" + dica("/buscar renato", "/ajuda")
-    achados = buscar(termo)
-    ctx.lembrar_resultados([path for path, _ in achados])
-    return render_busca(termo, achados)
+    return render_busca(termo, buscar(termo), ctx)
 
 
-def cmd_hoje(ctx: Contexto) -> str:
+def cmd_hoje(ctx: Contexto) -> Tela:
     path = briefing_recente()
     if path is None:
-        return f"{MARCA_NADA} Nenhum briefing em <code>briefings/</code>."
-    return _abrir(path, ctx, MARCA_BRIEFING)
+        return Tela(f"{MARCA_NADA} Nenhum briefing em <code>briefings/</code>.", [[INICIO]])
+    return _abrir(path, ctx)
 
 
-def cmd_indice(letra: str, numero: int, ctx: Contexto) -> str:
-    """`/p3`, `/s2`, `/r1`, `/d2`, `/l1`. O número que apareceu na resposta anterior é o
-    comando seguinte — é isso que torna o bot aprendível sem ler a ajuda."""
-    if letra == "s":
-        if ctx.nota is None:
-            raise ConsultaError("Nenhuma nota aberta. Mande /ver e escolha uma.")
-        nota = carregar(ctx.nota)
-        if numero == 0:
-            return _mostrar(nota, ctx, ctx.marca)
-        ctx.lembrar_nota(nota, ctx.marca)
-        return render_secao(nota, numero)
-    if letra == "d":
-        if numero == 0:
-            if ctx.pasta is None:
-                raise ConsultaError("Nenhuma pasta aberta. Mande /pastas e escolha uma.")
-            return _abrir_pasta(ctx.pasta, ctx)
-        return _abrir_pasta(ctx.escolher("d", numero), ctx)
-    return _abrir(ctx.escolher(letra, numero), ctx)
+def cmd_inicio(ctx: Contexto) -> Tela:
+    return render_inicio(projetos(), briefing_recente(), ctx)
 
 
-def cmd_inicio(ctx: Contexto) -> str:
-    lista = projetos()
-    ctx.lembrar_projetos(lista)
-    return render_inicio(lista, briefing_recente())
-
-
-def cmd_ajuda() -> str:
+def cmd_ajuda() -> Tela:
     return render_ajuda()
+
+
+def cmd_botao(dado: str, ctx: Contexto) -> Tela:
+    """O toque num botão. Vocabulário do `dado`:
+
+    `i` início · `v` projetos · `h` briefing · `n` pastas · `a` ajuda · `q:<termo>` busca ·
+    `o:<ref>` abre nota · `d:<ref>` abre pasta · `l:<ref>` ligações da nota ·
+    `s:<ref>:<k>` seção k (0 = índice da nota).
+
+    `b` (pedir o termo da busca) e `j…` (jobs) não passam por aqui: dependem do bot."""
+    verbo, _, resto = dado.partition(":")
+    if verbo == "i":
+        return cmd_inicio(ctx)
+    if verbo == "v":
+        return cmd_ver("", ctx)
+    if verbo == "h":
+        return cmd_hoje(ctx)
+    if verbo == "n":
+        return cmd_pastas(ctx)
+    if verbo == "a":
+        return cmd_ajuda()
+    if verbo == "q":
+        return cmd_buscar(resto, ctx)
+    if verbo == "o":
+        return _abrir(ctx.caminho(resto), ctx)
+    if verbo == "d":
+        return _abrir_pasta(ctx.caminho(resto), ctx)
+    if verbo == "l":
+        nota = carregar(ctx.caminho(resto))
+        return render_ligacoes(nota, *ligacoes(nota.path), ctx)
+    if verbo == "s":
+        ref, _, numero = resto.rpartition(":")
+        if not numero.isdigit():
+            raise ConsultaError("Botão com defeito. Toque em Início.")
+        nota = carregar(ctx.caminho(ref))
+        return _mostrar(nota, ctx) if int(numero) == 0 else render_secao(nota, int(numero), ctx)
+    raise ConsultaError("Não conheço esse botão. Toque em Início.")

@@ -32,7 +32,6 @@ import json
 import logging
 import mimetypes
 import os
-import re
 import shutil
 import sys
 import threading
@@ -74,9 +73,9 @@ EXIT_OK, EXIT_FAILED, EXIT_NOT_CONFIGURED = 0, 1, 2
 # comando -> primeira palavra que a triagem entende
 PREFIX_COMMANDS = {"tarefa": "tarefa", "ideia": "ideia", "planejamento": "planejamento", "diario": "diário"}
 # Comandos de leitura do vault. Somente leitura: não abrem, não alimentam e não fecham sessão.
-# Um atalho de uma letra por verbo, e nada além disso: sinônimo demais é vocabulário para
-# decorar, que é o oposto do pedido. `0` é a tela inicial — o comando para quem não lembra
-# de nenhum outro.
+# Digitar é o caminho secundário: /inicio abre a tela com botões, e dali em diante é só tocar.
+# Os atalhos de uma letra e o `0` continuam valendo para quem já os tem nos dedos, mas não são
+# mais anunciados.
 CONSULTA_COMMANDS = {
     "0": "inicio", "inicio": "inicio", "menu": "inicio",
     "ver": "ver", "v": "ver",
@@ -86,13 +85,6 @@ CONSULTA_COMMANDS = {
     "ajuda": "ajuda", "a": "ajuda",
 }
 
-# `/p3`, `/s2`, `/r1`, `/d2`, `/l1`: o número que apareceu na resposta anterior vira o comando
-# seguinte. É o que dá a curva de aprendizado curta — nada para memorizar, o próximo passo está
-# na tela.
-INDICE_RE = re.compile(r"^([psrdl])(\d{1,3})$")
-# `/j1`: mesma ideia do `/p3`, para os jobs do PC. Fica separado do INDICE_RE porque não
-# depende do contexto da conversa — a lista de jobs é fixa, não é resultado de uma busca.
-JOB_RE = re.compile(r"^j(\d{1,2})$")
 JOB_COMMANDS = {"j": "jobs", "jobs": "jobs"}
 KIND_LABELS = {
     "texto": "texto", "voz": "voz", "audio": "áudio", "foto": "foto",
@@ -103,13 +95,13 @@ KIND_LABELS = {
 # e um comando que só existe no texto da ajuda é um comando que ele precisa lembrar — que é
 # justamente o que o sistema dele não pode exigir. Captura primeiro, consulta depois.
 MENU = [
-    ("inicio", "para onde ir  (atalho: /0)"),
-    ("ver", "projetos ativos, ou /ver ppj  (atalho: /v)"),
-    ("buscar", "procura um termo nas notas  (atalho: /b)"),
-    ("hoje", "o briefing mais recente  (atalho: /h)"),
-    ("pastas", "navega pelas pastas e links do vault  (atalho: /n)"),
-    ("ajuda", "como mexer aqui  (atalho: /a)"),
+    ("inicio", "consultar o vault: tudo por botões daqui"),
+    ("buscar", "procura um termo nas notas"),
+    ("hoje", "o briefing mais recente"),
+    ("ver", "projetos ativos, ou /ver ppj para abrir uma nota"),
+    ("pastas", "navega pelas pastas do vault"),
     ("j", "roda um job no PC (promover, reuniões, briefing)"),
+    ("ajuda", "como mexer aqui"),
     ("tarefa", "registra uma tarefa"),
     ("ideia", "registra uma ideia"),
     ("planejamento", "registra um planejamento"),
@@ -134,7 +126,7 @@ def _ajuda() -> str:
         "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
         "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela.\n"
         "\n"
-        "Consultar: /0 mostra para onde ir. /ajuda explica o resto."
+        "Consultar: /inicio e depois é só tocar nos botões."
     )
 
 
@@ -396,6 +388,14 @@ def _starts_with_diario(text: str) -> bool:
     return bool(words) and _normalize_word(words[0]) in ("diario", "diarios")
 
 
+def _teclado(botoes: list[list[tuple[str, str]]]) -> dict:
+    """Botões da consulta no formato da Bot API. Teclado vazio também é enviado: é o que tira
+    os botões de uma mensagem trocada para uma tela que não tem nenhum."""
+    return {"inline_keyboard": [
+        [{"text": rotulo, "callback_data": dado} for rotulo, dado in linha] for linha in botoes
+    ]}
+
+
 @dataclass
 class Session:
     directory: Path
@@ -419,9 +419,12 @@ class Bot:
     def __init__(self, token: str):
         self.token = token
         self.session: Session | None = None
-        # Memória curta da consulta, para `/p3` e `/s2` significarem alguma coisa. Morre com
-        # o processo de propósito: ver consulta.Contexto.
+        # Liga cada botão à nota que ele abre. Morre com o processo de propósito: ver
+        # consulta.Contexto.
         self.contexto = consulta.Contexto()
+        # Mensagens "O que procurar?" ainda sem resposta. A resposta a uma delas é busca, não
+        # captura — sem isto, o termo viraria nota de complemento da mensagem respondida.
+        self.pedidos_busca: set[int] = set()
 
     def reply(self, message: dict, text: str) -> None:
         try:
@@ -433,8 +436,14 @@ class Bot:
         except TelegramError as e:
             logger.warning(f"Telegram: falha ao responder: {e}")
 
-    def reply_html(self, message: dict, text: str) -> None:
-        """Resposta formatada da consulta, quebrada em mensagens por linha inteira.
+    def reply_html(self, message: dict, tela: "consulta.Tela | str") -> None:
+        """Resposta formatada da consulta, com os botões na última mensagem."""
+        if isinstance(tela, str):
+            tela = consulta.Tela(tela)
+        self._enviar_tela(message["chat"]["id"], tela, responder_a=message["message_id"])
+
+    def _enviar_tela(self, chat_id: int, tela: "consulta.Tela", responder_a: int | None = None) -> None:
+        """Quebra em mensagens por linha inteira; os botões vão na última, que é onde o dedo está.
 
         `parse_mode` vive só aqui: `send()` e `notify()` mandam texto puro (briefing, avisos de
         job) com `<` e `&` sem escapar, e ligar HTML neles devolveria 400. Se ainda assim a API
@@ -444,33 +453,87 @@ class Bot:
         sem tags nesse caso trocaria a resposta boa por uma feia sem motivo — além de arriscar
         duas mensagens se a primeira tiver chegado e só a resposta ter se perdido.
         """
-        for indice, parte in enumerate(consulta.partir(text)):
+        partes = consulta.partir(tela.texto)
+        for indice, parte in enumerate(partes):
             params = {
-                "chat_id": message["chat"]["id"],
+                "chat_id": chat_id,
                 "text": parte,
                 "parse_mode": "HTML",
                 "link_preview_options": {"is_disabled": True},
             }
-            if indice == 0:
+            if indice == 0 and responder_a is not None:
                 params["reply_parameters"] = {
-                    "message_id": message["message_id"], "allow_sending_without_reply": True,
+                    "message_id": responder_a, "allow_sending_without_reply": True,
                 }
-            try:
-                call(self.token, "sendMessage", **params)
-            except TelegramError as e:
-                if e.code != 400:
-                    logger.warning(f"Telegram: falha ao responder consulta: {e}")
-                    return
-                logger.warning(f"Telegram: HTML recusado ({e}); reenviando sem formatação.")
-                params.pop("parse_mode")
-                params["text"] = consulta.sem_tags(parte)
-                try:
-                    call(self.token, "sendMessage", **params)
-                except TelegramError as e2:
-                    logger.warning(f"Telegram: falha ao responder consulta: {e2}")
-                    return
+            if indice == len(partes) - 1 and tela.botoes:
+                params["reply_markup"] = _teclado(tela.botoes)
+            if not self._chamar_html("sendMessage", params):
+                return
+
+    def _trocar_tela(self, mensagem: dict, tela: "consulta.Tela") -> None:
+        """O toque num botão troca a própria mensagem em vez de mandar outra: a navegação
+        acontece numa janela só, e o chat não enche de telas intermediárias.
+
+        Tela que não cabe numa mensagem (nota longa de verdade) não dá para trocar — vai como
+        mensagens novas, com os botões na última."""
+        partes = consulta.partir(tela.texto)
+        if len(partes) > 1:
+            self._enviar_tela(mensagem["chat"]["id"], tela)
+            return
+        params = {
+            "chat_id": mensagem["chat"]["id"],
+            "message_id": mensagem["message_id"],
+            "text": partes[0],
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+            "reply_markup": _teclado(tela.botoes),
+        }
+        self._chamar_html("editMessageText", params)
+
+    def _chamar_html(self, method: str, params: dict) -> bool:
+        """Chama com HTML e, só num 400, repete sem tags. Devolve False se nada saiu."""
+        try:
+            call(self.token, method, **params)
+            return True
+        except TelegramError as e:
+            if e.code != 400:
+                logger.warning(f"Telegram: falha ao responder consulta: {e}")
+                return False
+            if "not modified" in str(e):
+                # Tocou em Início estando no Início: a tela já é aquela.
+                return True
+            logger.warning(f"Telegram: HTML recusado ({e}); reenviando sem formatação.")
+        params = dict(params)
+        params.pop("parse_mode")
+        params["text"] = consulta.sem_tags(params["text"])
+        try:
+            call(self.token, method, **params)
+            return True
+        except TelegramError as e2:
+            logger.warning(f"Telegram: falha ao responder consulta: {e2}")
+            return False
+
+    def _pedir_busca(self, chat_id: int, responder_a: int | None = None) -> None:
+        """Pergunta o termo com `force_reply`: o app abre o teclado já respondendo, e ele só
+        digita a palavra — sem `/b` na frente."""
+        params = {
+            "chat_id": chat_id,
+            "text": f"{consulta.MARCA_BUSCA} O que procurar?",
+            "reply_markup": {"force_reply": True, "input_field_placeholder": "termo da busca"},
+        }
+        if responder_a is not None:
+            params["reply_parameters"] = {"message_id": responder_a, "allow_sending_without_reply": True}
+        try:
+            enviada = call(self.token, "sendMessage", **params)
+        except TelegramError as e:
+            logger.warning(f"Telegram: falha ao pedir o termo da busca: {e}")
+            return
+        self.pedidos_busca.add(enviada["message_id"])
 
     def handle_update(self, update: dict) -> None:
+        if update.get("callback_query"):
+            self._handle_callback(update["callback_query"])
+            return
         message = update.get("message")
         if not message:
             return
@@ -491,6 +554,12 @@ class Bot:
             logger.warning(f"Telegram: mensagem de chat não autorizado ignorada (chat_id={chat_id})")
             return
 
+        respondida = (message.get("reply_to_message") or {}).get("message_id")
+        if text and not command and respondida in self.pedidos_busca:
+            self.pedidos_busca.discard(respondida)
+            self._consultar(message, "buscar", lambda: consulta.cmd_buscar(text, self.contexto))
+            return
+
         try:
             if command:
                 self._handle_command(message, command, rest)
@@ -500,12 +569,60 @@ class Bot:
             logger.exception(f"Telegram: falha ao capturar a mensagem {message.get('message_id')}")
             self.reply(message, "Não consegui salvar esta mensagem. Reenvie, por favor.")
 
+    def _handle_callback(self, toque: dict) -> None:
+        """Toque num botão. Sempre responde o `answerCallbackQuery`, senão o botão fica girando
+        no app; erro vira aviso passageiro no topo da tela, não mensagem nova no chat."""
+        mensagem = toque.get("message") or {}
+        chat_id = (mensagem.get("chat") or {}).get("id")
+        if chat_id is None or chat_id != get_owner_chat_id():
+            logger.warning(f"Telegram: toque de chat não autorizado ignorado (chat_id={chat_id})")
+            return
+        dado = toque.get("data") or ""
+        inicio = time.monotonic()
+        tela, aviso = None, None
+        try:
+            if dado == "b":
+                self._pedir_busca(chat_id)
+            elif dado.startswith("j"):
+                tela = jobs.cmd_botao(dado)
+            else:
+                tela = consulta.cmd_botao(dado, self.contexto)
+        except (consulta.ConsultaError, jobs.JobError) as e:
+            aviso = str(e)
+        except Exception:
+            logger.exception(f"Telegram: falha no botão {dado.split(':', 1)[0]}")
+            aviso = "Não consegui ler o vault agora. O log do Logos tem o motivo."
+        try:
+            params = {"callback_query_id": toque["id"]}
+            if aviso:
+                params["text"] = aviso[:200]
+            call(self.token, "answerCallbackQuery", **params)
+        except TelegramError as e:
+            logger.warning(f"Telegram: falha ao confirmar o toque: {e}")
+        if tela is not None:
+            self._trocar_tela(mensagem, tela)
+        # Só o verbo vai para o log: o resto do dado pode ser um termo de busca.
+        logger.info(f"Telegram: botão {dado.split(':', 1)[0]} respondido em {time.monotonic() - inicio:.1f}s")
+
     def _handle_command(self, message: dict, command: str, rest: str) -> None:
         if command == "start":
             self.reply(message, "Logos já está conectado a este chat.\n\n" + _ajuda())
-        elif command in CONSULTA_COMMANDS or INDICE_RE.match(command):
-            self._consultar(message, command, rest)
-        elif command in JOB_COMMANDS or JOB_RE.match(command):
+        elif command in CONSULTA_COMMANDS:
+            verbo = CONSULTA_COMMANDS[command]
+            if verbo == "buscar" and not rest:
+                self._pedir_busca(message["chat"]["id"], responder_a=message["message_id"])
+                return
+            ctx = self.contexto
+            produzir = {
+                "ver": lambda: consulta.cmd_ver(rest, ctx),
+                "buscar": lambda: consulta.cmd_buscar(rest, ctx),
+                "hoje": lambda: consulta.cmd_hoje(ctx),
+                "pastas": lambda: consulta.cmd_pastas(ctx),
+                "ajuda": consulta.cmd_ajuda,
+                "inicio": lambda: consulta.cmd_inicio(ctx),
+            }[verbo]
+            self._consultar(message, command, produzir)
+        elif command in JOB_COMMANDS:
             self._job(message, command)
         elif command in PREFIX_COMMANDS:
             if not rest:
@@ -525,7 +642,7 @@ class Bot:
         else:
             self.reply(message, _ajuda())
 
-    def _consultar(self, message: dict, command: str, rest: str) -> None:
+    def _consultar(self, message: dict, command: str, produzir) -> None:
         """Leitura do vault. Não toca a sessão de captura aberta: perguntar não é capturar.
 
         Registra o tempo de resposta: sem isso, uma consulta bem-sucedida não deixa rastro no
@@ -533,23 +650,7 @@ class Bot:
         comando vai para o log — o termo buscado, não."""
         inicio = time.monotonic()
         try:
-            indice = INDICE_RE.match(command)
-            if indice:
-                texto = consulta.cmd_indice(indice.group(1), int(indice.group(2)), self.contexto)
-            else:
-                verbo = CONSULTA_COMMANDS[command]
-                if verbo == "ver":
-                    texto = consulta.cmd_ver(rest, self.contexto)
-                elif verbo == "buscar":
-                    texto = consulta.cmd_buscar(rest, self.contexto)
-                elif verbo == "hoje":
-                    texto = consulta.cmd_hoje(self.contexto)
-                elif verbo == "pastas":
-                    texto = consulta.cmd_pastas(self.contexto)
-                elif verbo == "ajuda":
-                    texto = consulta.cmd_ajuda()
-                else:
-                    texto = consulta.cmd_inicio(self.contexto)
+            tela = produzir()
         except consulta.ConsultaError as e:
             self.reply(message, str(e))
             return
@@ -557,30 +658,21 @@ class Bot:
             logger.exception(f"Telegram: falha na consulta /{command}")
             self.reply(message, "Não consegui ler o vault agora. O log do Logos tem o motivo.")
             return
-        self.reply_html(message, texto)
+        self.reply_html(message, tela)
         logger.info(f"Telegram: /{command} respondido em {time.monotonic() - inicio:.1f}s")
 
     def _job(self, message: dict, command: str) -> None:
-        """Dispara um job headless do vault. Não toca a sessão de captura, como a consulta."""
-        indice = JOB_RE.match(command)
+        """`/j` mostra os jobs como botões. Disparar é sempre por botão, com confirmação."""
         try:
-            if not indice:
-                self.reply_html(message, jobs.render_lista())
-                return
-            job = jobs.por_indice(int(indice.group(1)))
-            if job is None:
-                self.reply_html(message, f"Não existe /{command}. /j lista o que dá para rodar.")
-                return
-            texto = jobs.disparar(job)
+            tela = jobs.render_lista()
         except jobs.JobError as e:
             self.reply(message, str(e))
             return
         except Exception:
-            logger.exception(f"Telegram: falha ao disparar /{command}")
-            self.reply(message, "Não consegui disparar o job. O log do Logos tem o motivo.")
+            logger.exception("Telegram: falha ao listar os jobs")
+            self.reply(message, "Não consegui listar os jobs. O log do Logos tem o motivo.")
             return
-        self.reply_html(message, texto)
-        logger.info(f"Telegram: /{command} disparado")
+        self.reply_html(message, tela)
 
     @staticmethod
     def _classify(message: dict, text: str) -> tuple[str | None, dict | None, str]:
@@ -753,7 +845,7 @@ class Bot:
                     username = call(self.token, "getMe")["username"]
                     logger.info(f"Telegram: bot @{username} conectado (long polling)")
                     publicar_menu(self.token)
-                params = {"timeout": POLL_TIMEOUT_S, "allowed_updates": ["message"]}
+                params = {"timeout": POLL_TIMEOUT_S, "allowed_updates": ["message", "callback_query"]}
                 if offset is not None:
                     params["offset"] = offset
                 updates = call(self.token, "getUpdates", http_timeout=POLL_TIMEOUT_S + 5, **params)

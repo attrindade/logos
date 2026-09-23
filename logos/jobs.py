@@ -130,16 +130,39 @@ def _pwsh() -> str:
     return caminho
 
 
-def render_lista() -> str:
-    """O que `/j` responde: os jobs numerados, já como comandos."""
+def render_lista() -> consulta.Tela:
+    """O que `/j` responde: um botão por job. O toque não dispara — abre a confirmação."""
     partes = [f"{MARCA_JOB} <b>Rodar no PC</b>", ""]
-    for indice, job in enumerate(JOBS, 1):
-        partes.append(f"/j{indice}  <b>{job.titulo}</b>  <i>{job.espera}</i>")
-        partes.append(f"      {job.detalhe}")
+    for job in JOBS:
+        partes.append(f"<b>{job.titulo}</b>  <i>{job.espera}</i>")
+        partes.append(job.detalhe)
+        partes.append("")
     dono = lock_dono()
     if dono:
-        partes += ["", f"{MARCA_FALHA} ocupado agora: <b>{consulta.esc(str(dono.get('owner')))}</b>"]
-    return "\n".join(partes) + consulta.dica("o resultado chega aqui quando terminar")
+        partes.append(f"{MARCA_FALHA} ocupado agora: <b>{consulta.esc(str(dono.get('owner')))}</b>")
+    botoes = [[(f"{MARCA_JOB} {job.titulo}", f"j:{indice}")] for indice, job in enumerate(JOBS, 1)]
+    return consulta.Tela("\n".join(partes).rstrip(), botoes + [[consulta.INICIO]])
+
+
+def render_confirmar(indice: int, job: Job) -> consulta.Tela:
+    """Um passo a mais de propósito: botão é fácil de tocar sem querer, e promover roda até
+    20 min e custa dinheiro de API. Digitar `/j1` era a confirmação; o toque não é."""
+    texto = (f"{MARCA_JOB} <b>{job.titulo}</b>?\n"
+             f"{job.detalhe}\n<i>Leva {job.espera}. O resultado chega aqui quando terminar.</i>")
+    return consulta.Tela(texto, [[("▶ Rodar agora", f"jr:{indice}"), (f"{consulta.MARCA_VOLTA} Voltar", "j")]])
+
+
+def cmd_botao(dado: str) -> consulta.Tela:
+    """`j` lista, `j:<n>` pede confirmação, `jr:<n>` dispara."""
+    verbo, _, numero = dado.partition(":")
+    if verbo == "j" and not numero:
+        return render_lista()
+    job = por_indice(int(numero)) if numero.isdigit() else None
+    if verbo not in ("j", "jr") or job is None:
+        raise JobError("Esse job não existe mais. Abra /j de novo.")
+    if verbo == "j":
+        return render_confirmar(int(numero), job)
+    return consulta.Tela(disparar(job), [[consulta.INICIO]])
 
 
 def _fmt_custo(entrada: dict) -> str:

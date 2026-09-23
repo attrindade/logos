@@ -4,6 +4,8 @@ O teste que importa mais é `test_diario_nunca_aparece`: a allowlist do `consult
 impede o diário e a blocklist de reuniões de saírem pelo chat, e ela não pode se afrouxar sem
 a suíte reclamar.
 """
+import re
+
 import pytest
 
 from logos import config, consulta
@@ -76,6 +78,48 @@ def vault(tmp_path, monkeypatch):
     return tmp_path
 
 
+# As telas têm texto e botões. Quase todo teste quer "o que ele vê": o texto e os rótulos. O
+# dado dos botões fica de fora — é código interno, não aparece na tela.
+def _t(tela: consulta.Tela) -> str:
+    return "\n".join([tela.texto] + [rotulo for linha in tela.botoes for rotulo, _ in linha])
+
+
+def _botoes(tela: consulta.Tela) -> list[tuple[str, str]]:
+    return [botao for linha in tela.botoes for botao in linha]
+
+
+def _tocar(tela: consulta.Tela, trecho: str, ctx) -> consulta.Tela:
+    """Toca o primeiro botão cujo rótulo contém o trecho — o que o dedo dele faria."""
+    for rotulo, dado in _botoes(tela):
+        if trecho in rotulo:
+            return consulta.cmd_botao(dado, ctx)
+    raise AssertionError(f"nenhum botão com “{trecho}” em {[r for r, _ in _botoes(tela)]}")
+
+
+def ver(arg, ctx):
+    return _t(consulta.cmd_ver(arg, ctx))
+
+
+def buscar(termo, ctx):
+    return _t(consulta.cmd_buscar(termo, ctx))
+
+
+def hoje(ctx):
+    return _t(consulta.cmd_hoje(ctx))
+
+
+def inicio(ctx):
+    return _t(consulta.cmd_inicio(ctx))
+
+
+def pastas(ctx):
+    return _t(consulta.cmd_pastas(ctx))
+
+
+def ajuda():
+    return _t(consulta.cmd_ajuda())
+
+
 # ---------------------------------------------------------------------------
 # Invariante 1: allowlist
 # ---------------------------------------------------------------------------
@@ -84,20 +128,20 @@ def test_diario_nunca_aparece(vault, ctx):
     """A trava do módulo inteiro. Nenhum comando pode devolver conteúdo, nome ou caminho de
     pasta fora da allowlist — o diário, a terapia e a blocklist com o nome da terapeuta."""
     respostas = [
-        consulta.cmd_ver("", ctx),
-        consulta.cmd_ver("diario", ctx),
-        consulta.cmd_ver("terapia", ctx),
-        consulta.cmd_buscar("Renato", ctx),
-        consulta.cmd_buscar("clínica", ctx),
-        consulta.cmd_hoje(ctx),
+        ver("", ctx),
+        ver("diario", ctx),
+        ver("terapia", ctx),
+        buscar("Renato", ctx),
+        buscar("clínica", ctx),
+        hoje(ctx),
     ]
     for resposta in respostas:
         for termo in PROIBIDO:
             assert termo.lower() not in resposta.lower(), f"vazou “{termo}” em: {resposta[:200]}"
 
     # E o bot nem admite que os arquivos existem.
-    assert "Não achei" in consulta.cmd_ver("diario", ctx)
-    assert "Não achei" in consulta.cmd_ver("terapia", ctx)
+    assert "Não achei" in ver("diario", ctx)
+    assert "Não achei" in ver("terapia", ctx)
 
 
 def test_allowlist_cobre_apenas_as_pastas_declaradas(vault):
@@ -107,7 +151,7 @@ def test_allowlist_cobre_apenas_as_pastas_declaradas(vault):
 
 
 def test_travessia_de_caminho_e_recusada(vault, ctx):
-    assert "Não achei" in consulta.cmd_ver("../../capturas/Diario/2026-09-20 - Diario", ctx)
+    assert "Não achei" in ver("../../capturas/Diario/2026-09-20 - Diario", ctx)
     with pytest.raises(consulta.ConsultaError):
         consulta.carregar(vault / "capturas/Diario/2026-09-20 - Diario.md")
 
@@ -119,7 +163,7 @@ def test_temporario_do_syncthing_ignorado(vault):
 def test_pasta_ausente_nao_derruba(tmp_path, monkeypatch, ctx):
     monkeypatch.setattr(config, "VAULT_DIR", tmp_path / "vazio")
     assert consulta.iter_notas() == []
-    assert "Nenhum projeto ativo" in consulta.cmd_ver("", ctx)
+    assert "Nenhum projeto ativo" in ver("", ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -127,37 +171,37 @@ def test_pasta_ausente_nao_derruba(tmp_path, monkeypatch, ctx):
 # ---------------------------------------------------------------------------
 
 def test_ver_lista_projetos_ativos(vault, ctx):
-    resposta = consulta.cmd_ver("", ctx)
+    resposta = ver("", ctx)
     assert "PPJ" in resposta and "Climatizando" in resposta
     assert "Gotchas" not in resposta  # brain não é projeto
 
 
 def test_ver_abre_por_nome_sem_acento_e_sem_caixa(vault, ctx):
-    assert "Políticas Públicas da Juventude" in consulta.cmd_ver("ppj", ctx)
-    assert "Climatizando" in consulta.cmd_ver("CLIMATIZANDO", ctx)
+    assert "Políticas Públicas da Juventude" in ver("ppj", ctx)
+    assert "Climatizando" in ver("CLIMATIZANDO", ctx)
 
 
 def test_ver_projeto_ativo_ganha_de_nota_homonima(vault, ctx):
     """'/ver logos' tem de ser a nota do projeto, não outra que case por substring."""
     (vault / "capturas/Inbox/Logos no celular.md").write_text("# Logos no celular\n", encoding="utf-8")
-    assert "Nota interna do projeto" in consulta.cmd_ver("logos", ctx)
+    assert "Nota interna do projeto" in ver("logos", ctx)
 
 
 def test_nome_exato_ganha_do_prefixo(vault, ctx):
     """'Climatizando' casa exato mesmo existindo 'Climatizando notas'."""
     (vault / "brain/Climatizando notas.md").write_text("# Clima notas\n", encoding="utf-8")
-    assert "Atos normativos" in consulta.cmd_ver("climatizando", ctx)
+    assert "Atos normativos" in ver("climatizando", ctx)
 
 
 def test_ver_nome_ambiguo_lista_candidatos(vault, ctx):
     (vault / "brain/Climatizando notas.md").write_text("# Clima notas\n", encoding="utf-8")
-    resposta = consulta.cmd_ver("clima", ctx)
+    resposta = ver("clima", ctx)
     assert "mais de uma nota" in resposta
     assert "Climatizando" in resposta and "Climatizando notas" in resposta
 
 
 def test_ver_nome_inexistente(vault, ctx):
-    assert "Não achei" in consulta.cmd_ver("inexistente", ctx)
+    assert "Não achei" in ver("inexistente", ctx)
 
 
 def test_nota_longa_vira_indice_de_secoes(vault, ctx):
@@ -167,26 +211,25 @@ def test_nota_longa_vira_indice_de_secoes(vault, ctx):
         ),
         encoding="utf-8",
     )
-    resposta = consulta.cmd_ver("ppj", ctx)
+    resposta = ver("ppj", ctx)
     assert "5 seções" in resposta
-    assert "/s1" in resposta and "Seção 1" in resposta
-    assert "/s5" in resposta and "Seção 5" in resposta
+    assert "Seção 1" in resposta and "Seção 5" in resposta
     assert "texto texto" not in resposta  # o índice não despeja o corpo
 
 
 def test_ver_secao_por_numero(vault, ctx):
-    resposta = consulta.cmd_ver("ppj 3", ctx)
+    resposta = ver("ppj 3", ctx)
     assert "Reunião 2026-09-21" in resposta and "Trinta e duas reuniões" in resposta
 
 
 def test_ver_secao_fora_da_faixa(vault, ctx):
     """ConsultaError sobe até o bot, que a devolve como texto no chat — ver Bot._consultar."""
     with pytest.raises(consulta.ConsultaError, match="3 seções"):
-        consulta.cmd_ver("ppj 99", ctx)
+        ver("ppj 99", ctx)
 
 
 def test_nota_curta_sai_inteira(vault, ctx):
-    resposta = consulta.cmd_ver("climatizando", ctx)
+    resposta = ver("climatizando", ctx)
     assert "Atos normativos" in resposta
 
 
@@ -195,22 +238,22 @@ def test_nota_curta_sai_inteira(vault, ctx):
 # ---------------------------------------------------------------------------
 
 def test_buscar_agrupa_por_arquivo(vault, ctx):
-    resposta = consulta.cmd_buscar("Renato", ctx)
+    resposta = buscar("Renato", ctx)
     assert "Gotchas" in resposta and "2026-09-18 - Renato" in resposta
 
 
 def test_buscar_ignora_acento_e_caixa(vault, ctx):
-    assert "PPJ" in consulta.cmd_buscar("reuniao", ctx)
+    assert "PPJ" in buscar("reuniao", ctx)
 
 
 def test_buscar_ignora_o_frontmatter(vault, ctx):
     """A nota do PPJ tem 'Políticas Públicas' na description e no corpo. O resultado é o corpo."""
-    resposta = consulta.cmd_buscar("Políticas Públicas", ctx)
+    resposta = buscar("Políticas Públicas", ctx)
     assert "description:" not in resposta
 
 
 def test_buscar_sem_resultado(vault, ctx):
-    assert "Nada com" in consulta.cmd_buscar("xyzzy", ctx)
+    assert "Nada com" in buscar("xyzzy", ctx)
 
 
 def test_buscar_termo_curto(vault):
@@ -219,7 +262,7 @@ def test_buscar_termo_curto(vault):
 
 
 def test_hoje_pega_o_briefing_mais_recente(vault, ctx):
-    resposta = consulta.cmd_hoje(ctx)
+    resposta = hoje(ctx)
     assert "Briefing 21" in resposta and "Briefing 20" not in resposta
 
 
@@ -228,7 +271,7 @@ def test_hoje_pega_o_briefing_mais_recente(vault, ctx):
 # ---------------------------------------------------------------------------
 
 def test_emoji_do_template_sai_dos_titulos(vault, ctx):
-    resposta = consulta.cmd_ver("ppj", ctx)
+    resposta = ver("ppj", ctx)
     assert "🏛️" not in resposta and "📁" not in resposta and "🎯" not in resposta
 
 
@@ -240,7 +283,7 @@ def test_emoji_no_corpo_tambem_sai_sem_desmontar_a_lista(vault, ctx):
         "  - 🎯 Item aninhado\n",
         encoding="utf-8",
     )
-    resposta = consulta.cmd_ver("climatizando", ctx)
+    resposta = ver("climatizando", ctx)
     assert "⚠️" not in resposta and "✅" not in resposta and "🎯" not in resposta
     assert "Relançar o watcher uma vez só." in resposta
     assert "- Primeiro item" in resposta
@@ -253,21 +296,21 @@ def test_seta_sobrevive(vault):
 
 
 def test_markdown_vira_texto_legivel(vault, ctx):
-    resposta = consulta.cmd_ver("ppj", ctx)
+    resposta = ver("ppj", ctx)
     assert "Cíclica" in resposta and "[[" not in resposta
     assert "**" not in resposta
     assert "| :--- |" not in resposta
 
 
 def test_callout_vira_linha_simples(vault, ctx):
-    resposta = consulta.cmd_ver("ppj 3", ctx)
+    resposta = ver("ppj 3", ctx)
     assert "[!note]" not in resposta
     assert "Note: O número vem do Tactiq" in resposta
 
 
 def test_conteudo_do_vault_e_escapado(vault, ctx):
     """O briefing tem '<Renato> & equipe'. Sem escapar, a Bot API devolve 400."""
-    resposta = consulta.cmd_hoje(ctx)
+    resposta = hoje(ctx)
     assert "&lt;Renato&gt; &amp; equipe" in resposta
     assert "<Renato>" not in resposta
 
@@ -291,49 +334,97 @@ def test_sem_tags_desfaz_a_formatacao():
 
 
 # ---------------------------------------------------------------------------
-# Atalhos numerados: /p1, /s2, /r3 e a tela inicial
+# Botões: o fluxo inteiro sem digitar nada
 # ---------------------------------------------------------------------------
 
-def test_listar_e_abrir_pelo_numero(vault, ctx):
-    """O fluxo inteiro que ele vai usar: /ver, /p1, /s2 — sem digitar nome nenhum."""
-    lista = consulta.cmd_ver("", ctx)
-    assert "/p1" in lista
-    primeiro = consulta.cmd_indice("p", 1, ctx)
-    assert ctx.nota is not None
-    assert ctx.nota.stem == consulta.projetos()[0].stem
-    assert consulta.projetos()[0].stem in primeiro or ctx.nota.stem in primeiro
+def test_listar_e_abrir_pelo_botao(vault, ctx):
+    """O fluxo que ele vai usar: Início → projeto → seção, só tocando."""
+    tela = consulta.cmd_inicio(ctx)
+    primeiro = consulta.projetos()[0].stem
+    nota = _tocar(tela, primeiro, ctx)
+    assert primeiro in nota.texto
 
 
-def test_secao_pelo_numero_usa_a_nota_aberta(vault, ctx):
-    consulta.cmd_ver("ppj", ctx)
-    resposta = consulta.cmd_indice("s", 3, ctx)
-    assert "Trinta e duas reuniões" in resposta
+def test_secao_pelo_botao_e_volta_ao_indice(vault, ctx):
+    (vault / "work/active/PPJ.md").write_text(
+        "---\nstatus: active\n---\n\n# PPJ\n\n" + "".join(
+            f"## Seção {n}\n\n{'texto ' * 200}\n\n" for n in range(1, 4)
+        ),
+        encoding="utf-8",
+    )
+    indice = consulta.cmd_ver("ppj", ctx)
+    secao = _tocar(indice, "Seção 2", ctx)
+    assert "2 de 3" in secao.texto
+    assert "Seção 3" in _tocar(secao, "›", ctx).texto        # próxima
+    assert "1 de 3" in _tocar(secao, "Anterior", ctx).texto
+    assert "3 seções" in _tocar(secao, "Índice", ctx).texto
 
 
-def test_s0_volta_ao_indice_da_nota(vault, ctx):
-    consulta.cmd_ver("ppj", ctx)
-    consulta.cmd_indice("s", 1, ctx)
-    volta = consulta.cmd_indice("s", 0, ctx)
-    assert "PPJ" in volta
+def test_botao_antigo_abre_sempre_a_mesma_nota(vault, ctx):
+    """Com botões, a mensagem velha continua tocável. O botão tem de apontar para a nota, não
+    para "o primeiro da última lista" — senão abriria outra nota sem avisar."""
+    velha = consulta.cmd_ver("", ctx)
+    rotulo, dado = _botoes(velha)[0]
+    consulta.cmd_buscar("Renato", ctx)       # outra lista no meio
+    consulta.cmd_pastas(ctx)
+    assert rotulo.split(" · ")[0].split(" ", 1)[1] in consulta.cmd_botao(dado, ctx).texto
 
 
-def test_secao_sem_nota_aberta(vault, ctx):
-    with pytest.raises(consulta.ConsultaError, match="Nenhuma nota aberta"):
-        consulta.cmd_indice("s", 1, ctx)
+def test_botao_de_antes_do_reinicio_venceu(vault, ctx):
+    """Processo novo, códigos novos. O botão velho diz que venceu em vez de abrir outra nota."""
+    dado = _botoes(consulta.cmd_ver("", ctx))[0][1]
+    novo = consulta.Contexto()
+    consulta.cmd_ver("", novo)               # o processo novo já numerou as mesmas notas
+    with pytest.raises(consulta.ConsultaError, match="reinício"):
+        consulta.cmd_botao(dado, novo)
 
 
-def test_indice_de_lista_que_venceu(vault, ctx):
-    """Depois de um relançamento o contexto nasce vazio: /p3 tem de explicar, não explodir."""
-    with pytest.raises(consulta.ConsultaError, match="Mande /ver de novo"):
-        consulta.cmd_indice("p", 3, ctx)
-    with pytest.raises(consulta.ConsultaError, match="Mande /buscar ou /pastas"):
-        consulta.cmd_indice("r", 1, ctx)
-    with pytest.raises(consulta.ConsultaError, match="Mande /pastas"):
-        consulta.cmd_indice("d", 2, ctx)
-    with pytest.raises(consulta.ConsultaError, match="Nenhuma pasta aberta"):
-        consulta.cmd_indice("d", 0, ctx)
-    with pytest.raises(consulta.ConsultaError, match="Abra uma nota"):
-        consulta.cmd_indice("l", 1, ctx)
+def test_botao_desconhecido_explica(vault, ctx):
+    with pytest.raises(consulta.ConsultaError):
+        consulta.cmd_botao("zz", ctx)
+    with pytest.raises(consulta.ConsultaError):
+        consulta.cmd_botao("s:xx:abc", ctx)
+
+
+def test_dado_de_todo_botao_cabe_no_limite_da_api(vault_ligado, ctx):
+    """A Bot API recusa `callback_data` acima de 64 bytes — e recusa a mensagem inteira."""
+    telas = [consulta.cmd_inicio(ctx), consulta.cmd_ver("", ctx), consulta.cmd_pastas(ctx),
+             consulta.cmd_buscar("Renato", ctx), consulta.cmd_ver("key decisions", ctx),
+             consulta.cmd_ver("um nome comprido que não existe em nota nenhuma do vault", ctx)]
+    for tela in telas:
+        for rotulo, dado in _botoes(tela):
+            assert 1 <= len(dado.encode("utf-8")) <= 64, dado
+            assert rotulo.strip()
+
+
+def test_toda_tela_tem_saida(vault, ctx):
+    """Botão é o mecanismo de navegação: tela sem botão é beco sem saída."""
+    for tela in (
+        consulta.cmd_ver("", ctx),
+        consulta.cmd_ver("climatizando", ctx),
+        consulta.cmd_buscar("Renato", ctx),
+        consulta.cmd_buscar("xyzzy", ctx),
+        consulta.cmd_ver("inexistente", ctx),
+        consulta.cmd_inicio(ctx),
+        consulta.cmd_ajuda(),
+        consulta.cmd_hoje(ctx),
+        consulta.cmd_pastas(ctx),
+    ):
+        assert tela.botoes, tela.texto[:80]
+
+
+def test_texto_nao_tem_mais_numero_comando(vault, ctx):
+    """O pedido de 22/09/2026: nada de /p1, /s2, /r1 na tela."""
+    for tela in (consulta.cmd_ver("", ctx), consulta.cmd_ver("ppj", ctx),
+                 consulta.cmd_buscar("Renato", ctx), consulta.cmd_inicio(ctx),
+                 consulta.cmd_pastas(ctx)):
+        assert not re.search(r"/[psrdl]\d", _t(tela)), tela.texto[:120]
+
+
+def test_nao_achei_oferece_buscar_o_termo(vault, ctx):
+    tela = consulta.cmd_ver("submit", ctx)
+    assert "Não achei" in tela.texto
+    assert "Renato" in _tocar(tela, "Buscar", ctx).texto
 
 
 # ---------------------------------------------------------------------------
@@ -362,34 +453,33 @@ def vault_ligado(vault):
 
 
 def test_pastas_lista_so_a_allowlist(vault, ctx):
-    resposta = consulta.cmd_pastas(ctx)
+    tela = consulta.cmd_pastas(ctx)
     for termo in PROIBIDO:
-        assert termo.lower() not in resposta.lower(), termo
-    assert "/d1" in resposta and "work/active" in resposta
-    assert len(ctx.pastas) == len(consulta.allowed_roots())
+        assert termo.lower() not in _t(tela).lower(), termo
+    assert "work/active" in _t(tela)
+    pastas_ = [b for b in _botoes(tela) if b[1].startswith("d:")]
+    assert len(pastas_) == len(consulta.allowed_roots())
 
 
-def test_pasta_mostra_subpastas_e_notas_numeradas(vault_ligado, ctx):
-    consulta.cmd_pastas(ctx)
-    indice = [consulta.rel(p) for p in ctx.pastas].index("work/active") + 1
-    resposta = consulta.cmd_indice("d", indice, ctx)
-    assert "/d1" in resposta and "Logos" in resposta       # subpasta
-    assert "/r1" in resposta and "PPJ" in resposta         # nota
-    assert [p.name for p in ctx.pastas] == ["Logos"]
-
-    sub = consulta.cmd_indice("d", 1, ctx)
-    assert "work/active/Logos" in sub and "Plano" in sub
-    # /d0 reabre a pasta aberta, e a nota aberta de dentro dela oferece a volta.
-    nota = consulta.cmd_indice("r", 1, ctx)
-    assert "/d0 volta à pasta" in nota
-    assert "work/active/Logos" in consulta.cmd_indice("d", 0, ctx)
+def test_pasta_mostra_subpastas_e_notas(vault_ligado, ctx):
+    active = _tocar(consulta.cmd_pastas(ctx), "work/active", ctx)
+    assert "Logos" in _t(active) and "PPJ" in _t(active)
+    sub = _tocar(active, "Logos", ctx)
+    assert "work/active/Logos" in sub.texto and "Plano" in _t(sub)
+    # A nota aberta de dentro da pasta volta para ela; a pasta volta para a de cima.
+    nota = _tocar(sub, "Plano", ctx)
+    assert "work/active/Logos" in _tocar(nota, consulta.MARCA_VOLTA, ctx).texto
+    assert "<b>work/active</b>" in _tocar(sub, consulta.MARCA_VOLTA, ctx).texto
+    # E a raiz legível volta para a lista de pastas, nunca para a mãe fora da allowlist.
+    assert "Pastas que eu leio" in _tocar(active, consulta.MARCA_VOLTA, ctx).texto
 
 
 def test_pasta_grande_mostra_as_recentes_e_aponta_a_busca(vault, ctx, monkeypatch):
     monkeypatch.setattr(consulta, "MAX_NOTAS_PASTA", 1)
-    resposta = consulta.render_pasta(vault / "briefings", *consulta.conteudo_pasta(vault / "briefings"))
-    assert "/r1" in resposta and "/r2" not in resposta
-    assert "e mais 1" in resposta and "/b" in resposta
+    tela = consulta.render_pasta(vault / "briefings", *consulta.conteudo_pasta(vault / "briefings"), ctx)
+    notas = [b for b in _botoes(tela) if b[1].startswith("o:")]
+    assert len(notas) == 1
+    assert "outras 1" in tela.texto and "busca" in tela.texto
 
 
 def test_pasta_fora_da_allowlist_e_recusada(vault, ctx):
@@ -400,32 +490,30 @@ def test_pasta_fora_da_allowlist_e_recusada(vault, ctx):
 
 
 def test_links_resolvem_por_nome_e_alias_e_somem_fora_da_allowlist(vault_ligado, ctx):
-    resposta = consulta.cmd_ver("key decisions", ctx)
+    tela = consulta.cmd_ver("key decisions", ctx)
     # O corpo da nota cita o diário pelo nome, e o corpo sempre foi mostrado como está; o que
-    # não pode é a lista de links transformar esse nome num atalho que abre alguma coisa.
-    links = resposta.split("<b>Links</b>")[-1]
+    # não pode é um botão transformar esse nome num atalho que abre alguma coisa.
+    links = [r for r, d in _botoes(tela) if r.startswith((consulta.MARCA_LINK, consulta.MARCA_CITADA))]
     for termo in PROIBIDO + ("2026-09-20", "Inexistente"):
-        assert termo.lower() not in links.lower(), termo
-    nomes = [p.stem for p in ctx.links]
+        assert not any(termo.lower() in r.lower() for r in links), termo
     # PPJ pelo nome, Clima pelo alias; Clima também cita esta nota, mas não aparece duas vezes.
-    assert nomes == ["PPJ", "Clima"]
-    assert "/l1" in resposta and "/l2" in resposta
-
-    seguido = consulta.cmd_indice("l", 2, ctx)
-    assert "<b>Clima</b>" in seguido
+    assert [r.split(" ", 1)[1] for r in links] == ["PPJ", "Clima"]
+    assert "<b>Clima</b>" in _tocar(tela, "Clima", ctx).texto
 
 
 def test_citada_em_lista_quem_aponta_para_a_nota(vault_ligado, ctx):
-    resposta = consulta.cmd_ver("ppj", ctx)
-    assert "Citada em" in resposta and "Key Decisions" in resposta
-    assert "Key Decisions" in [p.stem for p in ctx.links]
+    tela = consulta.cmd_ver("ppj", ctx)
+    assert "citada em 1" in tela.texto
+    assert f"{consulta.MARCA_CITADA} Key Decisions" in _t(tela)
 
 
-def test_abrir_secao_preserva_os_links_da_nota(vault_ligado, ctx):
-    consulta.cmd_ver("ppj", ctx)
-    antes = list(ctx.links)
-    consulta.cmd_indice("s", 1, ctx)
-    assert ctx.links == antes and antes
+def test_muitas_ligacoes_viram_um_botao_so(vault_ligado, ctx, monkeypatch):
+    monkeypatch.setattr(consulta, "MAX_LIGACOES_NA_NOTA", 1)
+    tela = consulta.cmd_ver("key decisions", ctx)
+    assert not any(r.startswith(consulta.MARCA_CITADA) for r, _ in _botoes(tela))
+    lista = _tocar(tela, "Ligações (2)", ctx)
+    assert "Clima" in _t(lista) and "PPJ" in _t(lista)
+    assert "<b>Key Decisions</b>" in _tocar(lista, consulta.MARCA_VOLTA, ctx).texto
 
 
 def test_aliases_em_lista_e_entre_colchetes():
@@ -435,61 +523,56 @@ def test_aliases_em_lista_e_entre_colchetes():
 
 
 def test_navegacao_nao_vaza_o_diario(vault_ligado, ctx):
-    """A trava de `test_diario_nunca_aparece`, passada por todo caminho de navegação."""
-    respostas = [consulta.cmd_pastas(ctx)]
-    pastas = list(ctx.pastas)
-    while pastas:
-        pasta = pastas.pop()
-        respostas.append(consulta._abrir_pasta(pasta, ctx))
-        pastas.extend(ctx.pastas)
+    """A trava de `test_diario_nunca_aparece`, passada por todo botão alcançável: percorre a
+    árvore inteira a partir do Início e das pastas, tocando em tudo."""
+    vistos: set[str] = set()
+    fila = [consulta.cmd_inicio(ctx), consulta.cmd_pastas(ctx)]
     for nome in ("key decisions", "clima", "ppj", "logos"):
-        respostas.append(consulta.cmd_ver(nome, ctx))
-        for destino in list(ctx.links):
-            respostas.append(consulta._abrir(destino, ctx))
-    for resposta in respostas:
+        fila.append(consulta.cmd_ver(nome, ctx))
+    telas = 0
+    while fila:
+        tela = fila.pop()
+        telas += 1
         for termo in PROIBIDO:
-            assert termo.lower() not in resposta.lower(), f"vazou “{termo}” em: {resposta[:200]}"
+            assert termo.lower() not in _t(tela).lower(), f"vazou “{termo}” em: {_t(tela)[:200]}"
+        for _, dado in _botoes(tela):
+            if dado in vistos or dado in ("b", "j", "a") or dado.startswith("q:"):
+                continue
+            vistos.add(dado)
+            fila.append(consulta.cmd_botao(dado, ctx))
+    assert telas > 15   # percorreu de verdade, não parou na primeira tela
 
 
-def test_indice_fora_da_lista(vault, ctx):
-    consulta.cmd_ver("", ctx)
-    with pytest.raises(consulta.ConsultaError, match="itens"):
-        consulta.cmd_indice("p", 99, ctx)
-
-
-def test_resultado_de_busca_abre_pelo_numero(vault, ctx):
+def test_resultado_de_busca_abre_pelo_botao(vault, ctx):
     busca = consulta.cmd_buscar("Renato", ctx)
-    assert "/r1" in busca
-    assert consulta.cmd_indice("r", 1, ctx)
-    assert ctx.nota is not None
+    assert "Lembrar do submit" in _tocar(busca, "2026-09-18 - Renato", ctx).texto
 
 
-def test_nome_ambiguo_tambem_vira_lista_numerada(vault, ctx):
+def test_nome_ambiguo_vira_botoes(vault, ctx):
     (vault / "brain/Climatizando notas.md").write_text("# Clima notas\n", encoding="utf-8")
-    resposta = consulta.cmd_ver("clima", ctx)
-    assert "/r1" in resposta and "/r2" in resposta
-    assert consulta.cmd_indice("r", 2, ctx)
+    tela = consulta.cmd_ver("clima", ctx)
+    assert "Clima notas" in _tocar(tela, "Climatizando notas", ctx).texto
 
 
-def test_inicio_orienta_e_deixa_os_atalhos_prontos(vault, ctx):
-    resposta = consulta.cmd_inicio(ctx)
-    assert "Para onde" in resposta
-    assert "/p1" in resposta and "/h" in resposta and "/b" in resposta
-    # O /p1 anunciado ali tem de funcionar na mensagem seguinte.
-    assert consulta.cmd_indice("p", 1, ctx)
+def test_inicio_orienta_e_os_botoes_funcionam(vault, ctx):
+    tela = consulta.cmd_inicio(ctx)
+    assert "Para onde" in tela.texto
+    assert "Briefing 21" in _tocar(tela, "Briefing", ctx).texto
+    assert "Pastas que eu leio" in _tocar(tela, "Pastas", ctx).texto
+    assert ("🔎 Buscar", "b") in _botoes(tela)
+    assert any(d == "j" for _, d in _botoes(tela))
 
 
 def test_inicio_com_vault_vazio(tmp_path, monkeypatch, ctx):
     monkeypatch.setattr(config, "VAULT_DIR", tmp_path / "vazio")
-    resposta = consulta.cmd_inicio(ctx)
-    assert "Para onde" in resposta and "/b" in resposta
+    tela = consulta.cmd_inicio(ctx)
+    assert "Para onde" in tela.texto and ("🔎 Buscar", "b") in _botoes(tela)
 
 
-def test_ajuda_cabe_numa_tela_e_ensina_o_fluxo(vault):
-    ajuda = consulta.cmd_ajuda()
-    assert len(ajuda) < consulta.LIMITE_MENSAGEM
-    for atalho in ("/0", "/v", "/b", "/h", "/p1", "/s1", "/r1"):
-        assert atalho in ajuda
+def test_ajuda_cabe_numa_tela(vault):
+    ajuda_ = consulta.cmd_ajuda()
+    assert len(ajuda_.texto) < consulta.LIMITE_MENSAGEM
+    assert "/inicio" in ajuda_.texto
 
 
 # ---------------------------------------------------------------------------
@@ -530,32 +613,38 @@ def test_nota_longa_de_verdade_cabe_nas_mensagens(vault, ctx):
         ),
         encoding="utf-8",
     )
-    consulta.cmd_ver("ppj", ctx)
-    for parte in consulta.partir(consulta.cmd_indice("s", 2, ctx)):
+    secao = _tocar(consulta.cmd_ver("ppj", ctx), "Seção 2", ctx)
+    for parte in consulta.partir(secao.texto):
         assert len(parte) <= consulta.LIMITE_MENSAGEM
 
 
 def test_marcadores_sao_estaveis(vault, ctx):
     """Marcador é semântica: o mesmo tipo de resposta abre sempre com o mesmo símbolo."""
-    assert consulta.cmd_ver("", ctx).startswith(consulta.MARCA_PROJETO)
-    assert consulta.cmd_buscar("Renato", ctx).startswith(consulta.MARCA_BUSCA)
-    assert consulta.cmd_hoje(ctx).startswith(consulta.MARCA_BRIEFING)
-    assert consulta.cmd_inicio(ctx).startswith(consulta.MARCA_INICIO)
-    assert consulta.cmd_ver("climatizando", ctx).startswith(consulta.MARCA_NOTA)
+    assert ver("", ctx).startswith(consulta.MARCA_PROJETO)
+    assert buscar("Renato", ctx).startswith(consulta.MARCA_BUSCA)
+    assert hoje(ctx).startswith(consulta.MARCA_BRIEFING)
+    assert inicio(ctx).startswith(consulta.MARCA_INICIO)
+    assert ver("climatizando", ctx).startswith(consulta.MARCA_NOTA)
 
 
-def test_toda_resposta_termina_com_um_proximo_passo(vault, ctx):
-    """A dica no rodapé é o mecanismo de aprendizado: sem ela o bot vira adivinhação."""
-    for resposta in (
-        consulta.cmd_ver("", ctx),
-        consulta.cmd_ver("climatizando", ctx),
-        consulta.cmd_buscar("Renato", ctx),
-        consulta.cmd_buscar("xyzzy", ctx),
-        consulta.cmd_ver("inexistente", ctx),
-        consulta.cmd_inicio(ctx),
-    ):
-        assert consulta.MARCA_DICA in resposta
-        assert "/" in resposta.rsplit(consulta.MARCA_DICA, 1)[1]
+def test_indice_do_briefing_volta_com_a_marca_do_briefing(vault, ctx):
+    """Marcador é semântica: briefing → seção → índice não pode devolver o briefing como nota
+    comum. A marca sai do caminho, porque o botão de voltar não sabe de onde a nota veio."""
+    (vault / "briefings/2026-09-21.md").write_text(
+        "# Briefing 21\n\n" + "".join(
+            f"## Bloco {n}\n\n{'texto ' * 200}\n\n" for n in range(1, 5)
+        ),
+        encoding="utf-8",
+    )
+    tela = consulta.cmd_hoje(ctx)
+    assert tela.texto.startswith(consulta.MARCA_BRIEFING)
+    secao = _tocar(tela, "Bloco 1", ctx)
+    assert _tocar(secao, "Índice", ctx).texto.startswith(consulta.MARCA_BRIEFING)
+
+
+def test_indice_de_projeto_segue_com_a_marca_de_nota(vault, ctx):
+    secao = consulta.cmd_ver("ppj 1", ctx)
+    assert _tocar(secao, "Índice", ctx).texto.startswith(consulta.MARCA_NOTA)
 
 
 def test_wikilink_com_ancora_perde_a_cerquilha(vault):
@@ -564,19 +653,3 @@ def test_wikilink_com_ancora_perde_a_cerquilha(vault):
     assert consulta.limpar("ver [[PPJ#Equipe|a equipe]]") == "ver a equipe"
     assert consulta.limpar("ver [[PPJ]]") == "ver PPJ"
 
-def test_s0_do_briefing_volta_com_a_marca_do_briefing(vault, ctx):
-    """Marcador é semântica: /h → /s1 → /s0 não pode devolver o briefing como nota comum."""
-    (vault / "briefings/2026-09-21.md").write_text(
-        "# Briefing 21\n\n" + "".join(
-            f"## Bloco {n}\n\n{'texto ' * 200}\n\n" for n in range(1, 5)
-        ),
-        encoding="utf-8",
-    )
-    assert consulta.cmd_hoje(ctx).startswith(consulta.MARCA_BRIEFING)
-    consulta.cmd_indice("s", 1, ctx)
-    assert consulta.cmd_indice("s", 0, ctx).startswith(consulta.MARCA_BRIEFING)
-
-
-def test_s0_de_projeto_segue_com_a_marca_de_nota(vault, ctx):
-    consulta.cmd_ver("ppj", ctx)
-    assert consulta.cmd_indice("s", 0, ctx).startswith(consulta.MARCA_NOTA)
