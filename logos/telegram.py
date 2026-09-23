@@ -82,6 +82,7 @@ CONSULTA_COMMANDS = {
     "buscar": "buscar", "b": "buscar",
     "hoje": "hoje", "h": "hoje",
     "pastas": "pastas", "n": "pastas",
+    "tipos": "tipos",
     "ajuda": "ajuda", "a": "ajuda",
 }
 
@@ -99,6 +100,7 @@ MENU = [
     ("buscar", "procura um termo nas notas"),
     ("hoje", "o briefing mais recente"),
     ("ver", "projetos ativos, ou /ver ppj para abrir uma nota"),
+    ("tipos", "notas por tipo: pessoas, tarefas, briefings..."),
     ("pastas", "navega pelas pastas do vault"),
     ("j", "roda um job no PC (promover, reuniões, briefing)"),
     ("ajuda", "como mexer aqui"),
@@ -116,8 +118,9 @@ MENU = [
 # em texto puro (o `reply`): uma mensagem só aceita um teclado, e as da consulta já levam os
 # botões delas. Reenviar o mesmo teclado não muda nada no app.
 BOTAO_INICIO = consulta.INICIO[0]
+BOTAO_TIPOS = consulta.TIPOS[0]
 TECLADO_FIXO = {
-    "keyboard": [[{"text": BOTAO_INICIO}]],
+    "keyboard": [[{"text": BOTAO_INICIO}, {"text": BOTAO_TIPOS}]],
     "is_persistent": True,
     "resize_keyboard": True,
     "input_field_placeholder": "texto, voz ou foto para capturar",
@@ -572,6 +575,9 @@ class Bot:
         if text == BOTAO_INICIO:
             self._consultar(message, "inicio", lambda: consulta.cmd_inicio(self.contexto))
             return
+        if text == BOTAO_TIPOS:
+            self._consultar(message, "tipos", consulta.cmd_tipos)
+            return
         respondida = (message.get("reply_to_message") or {}).get("message_id")
         if text and not command and respondida in self.pedidos_busca:
             self.pedidos_busca.discard(respondida)
@@ -636,6 +642,7 @@ class Bot:
                 "buscar": lambda: consulta.cmd_buscar(rest, ctx),
                 "hoje": lambda: consulta.cmd_hoje(ctx),
                 "pastas": lambda: consulta.cmd_pastas(ctx),
+                "tipos": consulta.cmd_tipos,
                 "ajuda": consulta.cmd_ajuda,
                 "inicio": lambda: consulta.cmd_inicio(ctx),
             }[verbo]

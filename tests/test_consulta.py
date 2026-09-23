@@ -569,6 +569,57 @@ def test_inicio_com_vault_vazio(tmp_path, monkeypatch, ctx):
     assert "Para onde" in tela.texto and ("🔎 Buscar", "b") in _botoes(tela)
 
 
+# ---------------------------------------------------------------------------
+# Tipos de nota
+# ---------------------------------------------------------------------------
+
+def _captura(vault, nome, categoria=None):
+    meta = f"---\ntipo: inbox\ncategoria: {categoria}\n---\n" if categoria else "---\ntipo: inbox\n---\n"
+    (vault / f"capturas/Inbox/{nome}.md").write_text(meta + f"\n# {nome}\n\nCorpo.\n", encoding="utf-8")
+
+
+def test_tipos_saem_das_pastas_e_da_categoria(vault, ctx):
+    (vault / "org/people").mkdir(parents=True)
+    (vault / "org/people/Bruna.md").write_text("# Bruna\n", encoding="utf-8")
+    _captura(vault, "Comprar pão", "tarefa")
+    _captura(vault, "Reunião ágil", "reunião")      # acento no valor não cria outro tipo
+    _captura(vault, "Outra reuniao", "reuniao")
+    rotulos = {t.rotulo: len(t.notas) for t in consulta.tipos()}
+    assert rotulos["Pessoas"] == 1 and rotulos["Tarefas"] == 1 and rotulos["Reuniões"] == 2
+    assert rotulos["Sem categoria"] == 1      # a do Renato, sem frontmatter
+    assert rotulos["Briefings"] == 2 and "Times" not in rotulos   # tipo vazio não aparece
+
+
+def test_tipo_abre_as_notas_e_a_nota_abre(vault, ctx):
+    _captura(vault, "Comprar pão", "tarefa")
+    tela = _tocar(consulta.cmd_inicio(ctx), "Tipos", ctx)
+    tarefas = _tocar(tela, "Tarefas", ctx)
+    assert "Tarefas" in tarefas.texto
+    assert "Corpo." in _tocar(tarefas, "Comprar pão", ctx).texto
+    assert "Tipos de nota" in _tocar(tarefas, consulta.MARCA_VOLTA, ctx).texto
+
+
+def test_tipo_grande_pagina(vault, ctx, monkeypatch):
+    monkeypatch.setattr(consulta, "MAX_NOTAS_TIPO", 1)
+    tela = consulta.cmd_tipo("brief", 0, ctx)
+    assert "1–1" in tela.texto
+    segunda = _tocar(tela, "Mais", ctx)
+    assert "2–2" in segunda.texto
+    assert _botoes(segunda)[0] != _botoes(tela)[0]      # outra nota, não a mesma de novo
+    assert "1–1" in _tocar(segunda, "Anteriores", ctx).texto
+    with pytest.raises(consulta.ConsultaError):
+        consulta.cmd_tipo("brief", 9, ctx)
+
+
+def test_tipos_nao_vazam_o_diario(vault, ctx):
+    for tipo in consulta.tipos():
+        for path in tipo.notas:
+            assert consulta._is_allowed(path)
+    texto = _t(consulta.cmd_tipos())
+    for termo in PROIBIDO:
+        assert termo.lower() not in texto.lower()
+
+
 def test_ajuda_cabe_numa_tela(vault):
     ajuda_ = consulta.cmd_ajuda()
     assert len(ajuda_.texto) < consulta.LIMITE_MENSAGEM

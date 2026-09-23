@@ -706,6 +706,14 @@ def test_botao_fixo_abre_o_inicio_e_nao_vira_captura(owner, api, vault_falso):
     assert "Para onde" in envio["text"] and "inline_keyboard" in envio["reply_markup"]
 
 
+def test_botao_fixo_de_tipos_lista_os_tipos(owner, api, vault_falso):
+    bot = Bot(TOKEN)
+    bot.handle_update(_update(telegram.BOTAO_TIPOS))
+    assert bot.session is None and list(config.INBOX_DIR.iterdir()) == []
+    [envio] = _chamadas(api, "sendMessage")
+    assert "Tipos de nota" in envio["text"] and "Projetos" in str(envio["reply_markup"])
+
+
 def test_so_o_rotulo_exato_e_consulta(owner, api, vault_falso, downloads):
     """"início da reunião" é captura; só o rótulo do botão abre o Início."""
     bot = Bot(TOKEN)
@@ -720,7 +728,7 @@ def test_respostas_em_texto_instalam_o_botao_fixo(owner, api, vault_falso, downl
         api.reset_mock()
         bot.handle_update(_update(texto))
         teclado = _chamadas(api, "sendMessage")[0]["reply_markup"]
-        assert teclado["keyboard"] == [[{"text": telegram.BOTAO_INICIO}]]
+        assert teclado["keyboard"] == [[{"text": telegram.BOTAO_INICIO}, {"text": telegram.BOTAO_TIPOS}]]
         assert teclado["is_persistent"] is True
 
 

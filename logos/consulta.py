@@ -602,6 +602,8 @@ Botao = tuple[str, str]
 
 INICIO: Botao = (f"{MARCA_INICIO} Início", "i")
 BUSCAR: Botao = (f"{MARCA_BUSCA} Buscar", "b")
+MARCA_TIPOS = "\U0001f5c2"
+TIPOS: Botao = (f"{MARCA_TIPOS} Tipos", "t")
 
 
 @dataclass
@@ -862,11 +864,119 @@ def render_inicio(notas: list[Path], briefing: Path | None, ctx: Contexto) -> Te
     linha = []
     if briefing is not None:
         linha.append((f"{MARCA_BRIEFING} Briefing {_data(briefing)}", "h"))
-    linha.append((f"{MARCA_PASTA} Pastas", "n"))
+    linha.append(TIPOS)
     botoes.append(linha)
-    botoes.append([BUSCAR, (f"{MARCA_JOB} Rodar no PC", "j")])
-    botoes.append([("Ajuda", "a")])
+    botoes.append([(f"{MARCA_PASTA} Pastas", "n"), BUSCAR])
+    botoes.append([(f"{MARCA_JOB} Rodar no PC", "j"), ("Ajuda", "a")])
     return Tela(texto, botoes)
+
+
+# ---------------------------------------------------------------------------
+# Tipos de nota: um atalho por espécie, atravessando as pastas
+# ---------------------------------------------------------------------------
+
+# O "tipo" sai do que o vault já registra, não de uma classificação nova: a pasta diz se é
+# pessoa, time, briefing; nas capturas, o campo `categoria` que o pipeline preenche diz se é
+# tarefa, insight, reunião. Categoria nova aparece sozinha — é lida das notas a cada consulta.
+ROTULOS_CATEGORIA = {
+    "tarefa": "Tarefas", "ideia": "Ideias", "insight": "Insights", "reuniao": "Reuniões",
+    "referencia": "Referências",
+}
+MARCA_PESSOA = "\U0001f464"
+MARCA_TIME = "\U0001f465"
+MARCA_CONHECIMENTO = "\U0001f9e0"
+MARCA_PLANEJAMENTO = "\U0001f5d3"
+MARCA_CAPTURA = "\U0001f4e5"
+MAX_NOTAS_TIPO = 15
+
+
+@dataclass
+class Tipo:
+    chave: str          # vai no dado do botão: curta e só ASCII
+    rotulo: str
+    marca: str
+    notas: list[Path]
+    por_nome: bool = False   # pessoas e times se procuram pelo nome, não pela data
+
+
+def _notas_em(sub: str) -> list[Path]:
+    pasta = vault_root() / sub
+    if not pasta.is_dir() or not _is_allowed(pasta):
+        return []
+    return [p for p in pasta.glob("*.md") if p.is_file() and _visivel(p)]
+
+
+def _recentes(notas: list[Path]) -> list[Path]:
+    return sorted(notas, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def tipos() -> list[Tipo]:
+    """Os tipos que têm ao menos uma nota, na ordem em que aparecem na tela."""
+    lista = [
+        Tipo("proj", "Projetos", MARCA_PROJETO, projetos()),
+        Tipo("pess", "Pessoas", MARCA_PESSOA,
+             sorted(_notas_em("org/people"), key=lambda p: _fold(p.stem)), por_nome=True),
+        Tipo("time", "Times", MARCA_TIME,
+             sorted(_notas_em("org/teams"), key=lambda p: _fold(p.stem)), por_nome=True),
+        Tipo("brief", "Briefings", MARCA_BRIEFING, _recentes(_notas_em("briefings"))),
+        Tipo("brain", "Conhecimento", MARCA_CONHECIMENTO,
+             sorted(_notas_em("brain"), key=lambda p: _fold(p.stem)), por_nome=True),
+        Tipo("plan", "Planejamento", MARCA_PLANEJAMENTO, _recentes(_notas_em("capturas/Planejamento"))),
+    ]
+    por_categoria: dict[str, list[Path]] = {}
+    for path in _notas_em("capturas/Inbox"):
+        try:
+            meta, _ = Nota._separar_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        categoria = re.sub(r"[^a-z0-9]", "", _fold(meta.get("categoria", "")))[:20]
+        por_categoria.setdefault(categoria, []).append(path)
+    for categoria in sorted(por_categoria, key=lambda c: (c == "", -len(por_categoria[c]), c)):
+        rotulo = ROTULOS_CATEGORIA.get(categoria, categoria.capitalize()) if categoria else "Sem categoria"
+        lista.append(Tipo(f"c-{categoria}", rotulo, MARCA_CAPTURA, _recentes(por_categoria[categoria])))
+    return [t for t in lista if t.notas]
+
+
+def render_tipos(lista: list[Tipo]) -> Tela:
+    if not lista:
+        return Tela(f"{MARCA_NADA} Nenhuma nota nas pastas que eu leio.", [[INICIO]])
+    botoes = _em_pares([(f"{t.marca} {_rotulo(t.rotulo, MAX_ROTULO_PAR - 5)} · {len(t.notas)}", f"t:{t.chave}:0")
+                        for t in lista])
+    return Tela(f"{MARCA_TIPOS} <b>Tipos de nota</b>", botoes + [[BUSCAR, INICIO]])
+
+
+def render_tipo(tipo: Tipo, pagina: int, ctx: Contexto) -> Tela:
+    """Uma página de 15. Pessoas em ordem alfabética, o resto das mais recentes para trás."""
+    paginas = max(1, -(-len(tipo.notas) // MAX_NOTAS_TIPO))
+    if not 0 <= pagina < paginas:
+        raise ConsultaError("Essa página não existe mais. Toque em Tipos.")
+    inicio = pagina * MAX_NOTAS_TIPO
+    fatia = tipo.notas[inicio:inicio + MAX_NOTAS_TIPO]
+    ordem = "em ordem alfabética" if tipo.por_nome else "das mais recentes"
+    texto = f"{tipo.marca} <b>{esc(tipo.rotulo)}</b> · {len(tipo.notas)} notas"
+    if paginas > 1:
+        texto += f"\n<i>{inicio + 1}–{inicio + len(fatia)}, {ordem}</i>"
+    botoes = [[_botao_nota(p, ctx, tipo.marca, data=not tipo.por_nome)] for p in fatia]
+    paginar = []
+    if pagina > 0:
+        paginar.append(("‹ Anteriores", f"t:{tipo.chave}:{pagina - 1}"))
+    if pagina < paginas - 1:
+        paginar.append(("Mais ›", f"t:{tipo.chave}:{pagina + 1}"))
+    if paginar:
+        botoes.append(paginar)
+    botoes.append([(f"{MARCA_VOLTA} Tipos", "t"), INICIO])
+    return Tela(texto, botoes)
+
+
+def cmd_tipos() -> Tela:
+    return render_tipos(tipos())
+
+
+def cmd_tipo(chave: str, pagina: int, ctx: Contexto) -> Tela:
+    for tipo in tipos():
+        if tipo.chave == chave:
+            return render_tipo(tipo, pagina, ctx)
+    raise ConsultaError("Esse tipo não tem mais notas. Toque em Tipos.")
 
 
 def render_ajuda() -> Tela:
@@ -961,7 +1071,7 @@ def cmd_botao(dado: str, ctx: Contexto) -> Tela:
 
     `i` início · `v` projetos · `h` briefing · `n` pastas · `a` ajuda · `q:<termo>` busca ·
     `o:<ref>` abre nota · `d:<ref>` abre pasta · `l:<ref>` ligações da nota ·
-    `s:<ref>:<k>` seção k (0 = índice da nota).
+    `s:<ref>:<k>` seção k (0 = índice da nota) · `t` tipos · `t:<chave>:<p>` página p do tipo.
 
     `b` (pedir o termo da busca) e `j…` (jobs) não passam por aqui: dependem do bot."""
     verbo, _, resto = dado.partition(":")
@@ -981,6 +1091,13 @@ def cmd_botao(dado: str, ctx: Contexto) -> Tela:
         return _abrir(ctx.caminho(resto), ctx)
     if verbo == "d":
         return _abrir_pasta(ctx.caminho(resto), ctx)
+    if verbo == "t":
+        if not resto:
+            return cmd_tipos()
+        chave, _, pagina = resto.rpartition(":")
+        if not pagina.isdigit():
+            raise ConsultaError("Botão com defeito. Toque em Tipos.")
+        return cmd_tipo(chave, int(pagina), ctx)
     if verbo == "l":
         nota = carregar(ctx.caminho(resto))
         return render_ligacoes(nota, *ligacoes(nota.path), ctx)
