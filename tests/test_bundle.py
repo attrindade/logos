@@ -78,9 +78,9 @@ def test_texto_foto_e_pdf_viram_uma_nota_com_anexos_e_sidecar(ledger):
     stt.assert_not_called()
     assert "Relatorio tecnico" in llm.call_args.args[0]  # a LLM recebe o texto do PDF
     note, text, fm = _note("Planejamento")
-    assert note.name == "2026-09-14_15-02-11 - Visita técnica.md"
-    assert fm["fonte_tipo"] == "pacote" and fm["canal"] == "telegram" and fm["fonte"] == NAME
-    assert fm["anexos"] == [f"{ANEXOS}/2026-09-14_15-02-11_1.jpg", f"{ANEXOS}/2026-09-14_15-02-11_2.pdf"]
+    assert note.name == "Plano — 2026-09-14.md"  # planejamento soma na nota do dia
+    assert fm["entradas"] == 1 and fm["horas"] == ["15:02"]
+    assert "## 15:02 — entrada 1 · Visita técnica" in text and "via telegram" in text
 
     anexos_dir = config.NOTES_DIR / "anexos" / "2026" / "09"
     assert (anexos_dir / "2026-09-14_15-02-11_1.jpg").read_bytes() == b"\xff\xd8jpeg"

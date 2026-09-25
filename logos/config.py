@@ -113,6 +113,9 @@ AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
 # ---------------------------------------------------------
 # Mensagens com menos que isso entre si formam um pacote (uma nota).
 TELEGRAM_WINDOW_MIN = float(os.getenv("LOGOS_TELEGRAM_WINDOW_MIN") or _user_cfg.get("telegram_window_min", 10))
+# Diário e plano feitos antes desta hora contam para o dia anterior: o diário da madrugada é do
+# dia que acabou de passar, não do que começa.
+VIRADA_DO_DIA_H = int(os.getenv("LOGOS_VIRADA_DO_DIA_H") or _user_cfg.get("virada_do_dia_h", 4))
 
 # Raiz do vault: embeds com caminho completo (writer) e base da allowlist de pastas que o
 # bot pode ler (consulta). Padrão: pasta-mãe de notes_dir.

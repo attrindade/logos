@@ -250,10 +250,9 @@ def test_comando_sem_texto_responde_uso(owner, api):
     assert _replies(api) == ["Uso: /ideia <texto>"]
 
 
-@pytest.mark.parametrize("text", ["/diario hoje foi longo", "Diário: hoje foi longo"])
-def test_diario_ganha_lembrete_da_nuvem(owner, api, text):
+def test_diario_digitado_sem_comando_ganha_lembrete_da_nuvem(owner, api):
     bot = Bot(TOKEN)
-    bot.handle_update(_update(text))
+    bot.handle_update(_update("Diário: hoje foi longo"))
     assert bot.session.manifest["mensagens"][0]["texto"].lower().startswith("diário")
     assert "nuvem" in _replies(api)[0]
 
@@ -589,6 +588,7 @@ def test_menu_cobre_todos_os_comandos_que_o_bot_entende(owner, api):
     nomes = {nome for nome, _ in telegram.MENU}
     verbos = set(telegram.CONSULTA_COMMANDS.values())
     assert set(telegram.PREFIX_COMMANDS) <= nomes
+    assert set(telegram.GUIDED_COMMANDS) <= nomes
     assert verbos <= nomes
     assert {"nova"} <= nomes
     for nome, descricao in telegram.MENU:
@@ -1000,3 +1000,261 @@ def test_toda_chamada_passa_pela_sessao():
     for chamada in ("requests.post(", "requests.get("):
         assert chamada not in corpo, f"{chamada} direto, fora da sessão"
     assert "_sessao.post(" in corpo and "_sessao.get(" in corpo
+
+
+def test_log_mascara_token_de_qualquer_origem():
+    """Em 22/09 o aviso de nova tentativa do urllib3 gravou a URL com o token no watcher.log."""
+    token = "8123456789:AAHfake-Token_que_nao_pode_vazar_1234567"
+    registro = logging.LogRecord(
+        "urllib3.connectionpool", logging.WARNING, __file__, 1,
+        "Retrying after connection broken: /bot%s/getUpdates", (token,), None,
+    )
+    telegram.FiltroDeToken().filter(registro)
+    assert token not in registro.getMessage() and "/bot<token>/getUpdates" in registro.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# /diario e /planejamento guiados
+# ---------------------------------------------------------------------------
+
+FORM_MSG = 77
+
+
+class _Contexto:
+    """Contexto falso do formulário: nada de vault nos testes do bot."""
+
+    def __init__(self, plano=None, amanha="", pendentes=(), projetos=("Climatizando", "PPJ"), entradas=0):
+        self._plano, self._amanha, self._pendentes = plano, amanha, list(pendentes)
+        self._projetos, self._entradas = list(projetos), entradas
+
+    def plano(self, dia):
+        return self._plano
+
+    def entradas_diario(self, dia):
+        return self._entradas
+
+    def amanha(self, dia):
+        return self._amanha
+
+    def pendentes(self, dia):
+        return self._pendentes
+
+    def projetos(self):
+        return self._projetos
+
+
+def _bot_guiado(api, contexto=None):
+    api.return_value = {"message_id": FORM_MSG}
+    bot = Bot(TOKEN)
+    bot.fonte_contexto = contexto or _Contexto()
+    return bot
+
+
+def _form_atual(api):
+    """A tela mais recente do formulário: a enviada ou a última trocada."""
+    chamadas = [c.kwargs for c in api.call_args_list if c.args[1] in ("sendMessage", "editMessageText")
+                and "inline_keyboard" in (c.kwargs.get("reply_markup") or {})]
+    return chamadas[-1]
+
+
+def _tocar(bot, api, rotulo):
+    dados = _dados(_form_atual(api))
+    [dado] = [d for r, d in dados.items() if r == rotulo or r.startswith(rotulo)]
+    bot.handle_update(_toque(dado, message_id=FORM_MSG))
+
+
+def _avisos(api):
+    return [c.get("text") for c in _chamadas(api, "answerCallbackQuery") if c.get("text")]
+
+
+def test_diario_abre_sessao_com_rota_e_formulario(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+
+    manifest = bot.session.manifest
+    assert manifest["rota"] == "diario" and manifest["form"]["msg_id"] == FORM_MSG
+    assert manifest["form"]["etapas"][0] == "humor"  # sem plano do dia, não pergunta se cumpriu
+    assert manifest["mensagens"] == [] and _staged() == [BUNDLE]
+    [envio] = _chamadas(api, "sendMessage")
+    assert "nuvem" in envio["text"] and "Etapa 1 de 8" in envio["text"]
+    assert set(_dados(envio)) >= {"1", "5", "Pular", "Concluir"}
+
+
+def test_diario_com_texto_entra_como_primeira_mensagem_sem_prefixo(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario hoje foi longo"))
+    assert bot.session.manifest["mensagens"][0]["texto"] == "hoje foi longo"
+
+
+def test_toque_grava_troca_a_mensagem_e_renova_a_janela(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    bot.session.last_at -= 9 * 60
+    _tocar(bot, api, "4")
+
+    assert bot.session.manifest["formulario"] == {"humor_nota": 4}
+    assert bot.session.manifest["form"]["passo"] == 1
+    [edit] = _chamadas(api, "editMessageText")
+    assert edit["message_id"] == FORM_MSG and "energia" in edit["text"]
+    assert bot.expire_if_idle(now=bot.session.last_at + 5 * 60) is None  # o toque renovou a janela
+    salvo = json.loads((telegram.staging_dir() / BUNDLE / "manifest.json").read_text(encoding="utf-8"))
+    assert salvo["formulario"] == {"humor_nota": 4}
+
+
+def test_mensagem_durante_a_pergunta_ganha_o_numero_dela(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    bot.handle_update(_update("antes das perguntas", message_id=8))
+    for _ in range(5):
+        _tocar(bot, api, "Pular")
+    _tocar(bot, api, "Próxima")  # pergunta 1 -> 2
+    bot.handle_update(_update("travou o deploy", message_id=9))
+
+    mensagens = bot.session.manifest["mensagens"]
+    assert "pergunta" not in mensagens[0]
+    assert mensagens[1]["pergunta"] == 2
+    assert _replies(api)[-1] == "Texto · na pergunta 2"
+
+
+def test_concluir_so_com_escalas_entrega_o_pacote(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    _tocar(bot, api, "3")
+    _tocar(bot, api, "Concluir")
+
+    assert bot.session is None and _inbox() == [BUNDLE]
+    manifest = _manifest(BUNDLE)
+    assert manifest["motivo_fechamento"] == "concluido" and manifest["formulario"] == {"humor_nota": 3}
+    ultimo = _chamadas(api, "editMessageText")[-1]
+    assert "fechado" in ultimo["text"] and ultimo["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_concluir_sem_resposta_nenhuma_descarta(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    _tocar(bot, api, "Concluir")
+    assert _inbox() == [] and _staged() == []
+
+
+def test_janela_vencida_no_meio_do_formulario_entrega_e_fecha_a_tela(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    _tocar(bot, api, "5")
+    bot.session.last_at -= 11 * 60
+
+    assert bot.expire_if_idle() == BUNDLE
+    assert _manifest(BUNDLE)["motivo_fechamento"] == "janela"
+    assert "fechado" in _chamadas(api, "editMessageText")[-1]["text"]
+
+
+def test_botao_de_formulario_fechado_vira_aviso(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    dados = _dados(_form_atual(api))
+    bot.handle_update(_update("/nova", message_id=8))
+    api.reset_mock()
+    bot.handle_update(_toque(dados["2"], message_id=FORM_MSG))
+
+    assert _avisos(api) == ["Esse formulário já fechou."]
+    assert not _chamadas(api, "editMessageText")
+
+
+def test_tela_antiga_do_mesmo_formulario_nao_aplica_duas_vezes(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    dados = _dados(_form_atual(api))
+    bot.handle_update(_toque(dados["2"], message_id=FORM_MSG))
+    bot.handle_update(_toque(dados["5"], message_id=FORM_MSG))  # toque duplo na mesma tela
+
+    assert bot.session.manifest["formulario"] == {"humor_nota": 2}
+    assert "já passou" in _avisos(api)[-1]
+
+
+def test_planejamento_fecha_a_sessao_comum_aberta(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("ideia solta", message_id=5))
+    bot.handle_update(_update("/planejamento", message_id=6))
+
+    assert _inbox() == ["2026-09-14 15-02-11 tg 5"]
+    assert bot.session.name == "2026-09-14 15-02-11 tg 6" and bot.session.manifest["rota"] == "planejamento"
+
+
+def test_nova_com_formulario_so_de_botoes(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    _tocar(bot, api, "4")
+    bot.handle_update(_update("/nova", message_id=8))
+    assert _inbox() == [BUNDLE]
+    assert "só com o check-in" in _replies(api)[-1]
+
+
+def test_recover_entrega_pacote_so_com_formulario(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    _tocar(bot, api, "4")
+
+    novo = Bot(TOKEN)  # o processo caiu e voltou
+    assert novo.recover() == [BUNDLE]
+    assert _manifest(BUNDLE)["formulario"] == {"humor_nota": 4}
+
+
+def test_responder_a_mensagem_do_formulario_fica_na_sessao(owner, api):
+    bot = _bot_guiado(api)
+    bot.handle_update(_update("/diario"))
+    bot.handle_update(_update("resposta", message_id=8, reply_to_message={"message_id": FORM_MSG}))
+    assert bot.session.size == 1 and _inbox() == []
+
+
+def test_diario_confere_o_plano_do_dia(owner, api):
+    contexto = _Contexto(plano={"entradas": 1, "foco": "[[PPJ]]", "intencao": "entregar a nota técnica",
+                                "proxima_acao": "", "acoes": []})
+    bot = _bot_guiado(api, contexto)
+    bot.handle_update(_update("/diario"))
+    envio = _form_atual(api)
+    assert "entregar a nota técnica" in envio["text"] and "Etapa 1 de 9" in envio["text"]
+    _tocar(bot, api, "Em parte")
+    assert bot.session.manifest["formulario"] == {"plano_cumprido": "parcial"}
+
+
+def test_planejamento_para_amanha_traz_diario_pendentes_e_foco(owner, api):
+    from logos import formulario
+
+    contexto = _Contexto(amanha="começar pelo relatório", pendentes=["Revisar orçamento", "Ligar para a Lorena"])
+    bot = _bot_guiado(api, contexto)
+    bot.handle_update(_update("/planejamento"))
+
+    rotulos = list(_dados(_form_atual(api)))
+    assert rotulos[0].startswith("Hoje · ") and rotulos[1].startswith("Amanhã · ")
+    _tocar(bot, api, "Amanhã")
+    assert bot.session.manifest["form"]["etapas"][:3] == ["para", "diario", "pendentes"]
+    tela = _form_atual(api)["text"]
+    assert "começar pelo relatório" in tela and "git" in tela
+
+    _tocar(bot, api, "Levar para o plano")
+    _tocar(bot, api, "[ ] Ligar")
+    assert "[x] Ligar para a Lorena" in _dados(_form_atual(api))
+    _tocar(bot, api, "Trazer marcadas")
+    _tocar(bot, api, "4")             # energia
+    _tocar(bot, api, "2 a 4h")        # tempo livre
+    _tocar(bot, api, "Climatizando")  # foco
+
+    manifest = bot.session.manifest
+    assert manifest["para"] == "2026-09-15"
+    assert manifest["formulario"] == {"horizonte": "amanha", "energia": 4, "tempo_livre": "2–4h",
+                                      "foco": "[[Climatizando]]"}
+    assert manifest["carregar"]["do_diario"] == "começar pelo relatório"
+    assert manifest["carregar"]["trazidas"] == ["Ligar para a Lorena"]
+    assert formulario.pergunta_atual(manifest) == 1
+
+
+def test_telas_do_formulario_nao_tem_emoji(owner, api):
+    bot = _bot_guiado(api, _Contexto(amanha="x", pendentes=["a"]))
+    bot.handle_update(_update("/planejamento"))
+    for rotulo in ("Amanhã", "Só ver", "Nenhuma", "Pular", "Pular", "Nenhum", "Próxima"):
+        _tocar(bot, api, rotulo)
+    for chamada in _chamadas(api, "sendMessage") + _chamadas(api, "editMessageText"):
+        textos = [chamada["text"]]
+        if "inline_keyboard" in (chamada.get("reply_markup") or {}):
+            textos += list(_dados(chamada))
+        for texto in textos:
+            assert not any(ord(c) > 0x2500 for c in texto), texto

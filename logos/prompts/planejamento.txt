@@ -18,13 +18,21 @@ titulo: "Título conciso e acionável entre aspas (até 8 palavras)"
 tags:
   - palavra1
   - palavra2
-prioridade: alta
-status: ativo
+foco: "[[Projeto]] que é o foco principal do dia, ou vazio se não ficou claro"
+intencao: "a UMA coisa que, feita, faz o dia valer, no infinitivo"
+prioridade: ""
+status: ""
 resumo: "2 a 3 frases resumindo o plano e contexto."
 proxima_acao: "a primeira ação física/concreta imediata a realizar no infinitivo"
 acoes:
   - "Tarefa 1 no infinitivo"
   - "Tarefa 2 no infinitivo"
+blocos:
+  manha: "o que vai na manhã, se foi dito"
+  tarde: "o que vai na tarde, se foi dito"
+  noite: "o que vai na noite, se foi dito"
+fica_de_fora:
+  - "o que o autor disse que não vai fazer, ou que pode travar"
 decisoes: []
 bloqueios: []
 vitorias: []
@@ -41,6 +49,10 @@ Regras e Inferência de Entidades:
 - Conexão e Inferência Ativa: Sempre que uma pessoa for mencionada, inclua ela e também infira/adicione o projeto correspondente na lista de projetos (ex: se citou Jonas -> inclua [[pesq-bonan]]). Da mesma forma, se citou um projeto (ex: manifestações) -> inclua o projeto [[pesq-manifestacao]] e as pessoas relacionadas ([[Eduardo]], [[Euzeneia]]).
 - Use [[Wikilinks]] APENAS para entidades que constam no Contexto de Referência acima (pessoas, projetos e times). NUNCA crie wikilink para ferramentas, tecnologias ou conceitos genéricos — escreva Whisper, Windows, inteligência artificial, manifestações como texto simples. Um wikilink para algo que não está na lista aponta para uma nota que não existe e polui o grafo do vault.
 - Não invente tarefas ou prazos que não foram ditos.
+- prioridade (alta, media ou baixa) e status só quando o autor disser; senão deixe "" (vazio). Não chute "alta".
+- blocos: preencha só os períodos (manha, tarde, noite) que o autor mencionou; os outros ficam "" (vazio). Guarde horários ditos ("às 16h") dentro do bloco.
+- O texto pode começar com linhas "Check-in informado pelo autor", "Ações trazidas do plano anterior" e "Nota do diário sobre o que muda". São fatos que o próprio autor informou: use como contexto, e inclua as ações trazidas em acoes.
+- As respostas podem vir sob títulos "### <pergunta>". A pergunta "Qual é a UMA coisa" responde intencao; "Como ficam manhã, tarde e noite" responde blocos; "O que fica de fora" responde fica_de_fora.
 - Se a transcrição for vazia ou mero ruído, retorne os campos vazios ou mínimos.
 
 Transcrição:

@@ -32,6 +32,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import sys
 import threading
@@ -44,7 +45,7 @@ import requests
 import urllib3
 import yaml
 
-from . import config, consulta, jobs
+from . import config, consulta, formulario, jobs
 from .triage import TELEGRAM_TAG, _normalize_word
 
 logger = logging.getLogger(__name__)
@@ -66,12 +67,14 @@ MESSAGE_LIMIT = 4096
 CAPTION_LIMIT = 1024
 PHOTO_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 MANIFEST = "manifest.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2  # v2: rota, formulário e `pergunta` por mensagem, todos opcionais
 
 EXIT_OK, EXIT_FAILED, EXIT_NOT_CONFIGURED = 0, 1, 2
 
 # comando -> primeira palavra que a triagem entende
-PREFIX_COMMANDS = {"tarefa": "tarefa", "ideia": "ideia", "planejamento": "planejamento", "diario": "diário"}
+PREFIX_COMMANDS = {"tarefa": "tarefa", "ideia": "ideia"}
+# Abrem a janela de pacote com a rota fixada e o formulário por botões.
+GUIDED_COMMANDS = {"diario": "diario", "planejamento": "planejamento"}
 # Comandos de leitura do vault. Somente leitura: não abrem, não alimentam e não fecham sessão.
 # Digitar é o caminho secundário: /inicio abre a tela com botões, e dali em diante é só tocar.
 # Os atalhos de uma letra e o `0` continuam valendo para quem já os tem nos dedos, mas não são
@@ -104,10 +107,10 @@ MENU = [
     ("pastas", "navega pelas pastas do vault"),
     ("j", "roda um job no PC (promover, reuniões, briefing)"),
     ("ajuda", "como mexer aqui"),
+    ("diario", "diário guiado: check-in e 3 perguntas, soma no dia"),
+    ("planejamento", "plano de hoje ou de amanhã, guiado por botões"),
     ("tarefa", "registra uma tarefa"),
     ("ideia", "registra uma ideia"),
-    ("planejamento", "registra um planejamento"),
-    ("diario", "registra no diário (passa pela nuvem)"),
     ("nova", "fecha a sessão de captura agora"),
 ]
 
@@ -140,7 +143,9 @@ def _ajuda() -> str:
     return (
         "Capturar: mande texto, voz, foto, PDF, documento, link ou localização. Mensagens "
         f"com até {_fmt_min(config.TELEGRAM_WINDOW_MIN)} min de intervalo viram uma nota só.\n"
-        "/tarefa <texto> · /ideia <texto> · /planejamento <texto> · /diario <texto>\n"
+        "/diario e /planejamento abrem um formulário por botões; o que você mandar junto entra "
+        "na mesma entrada, e as entradas do dia se somam numa nota só.\n"
+        "/tarefa <texto> · /ideia <texto>\n"
         "/nova fecha a sessão agora. Responder a uma mensagem antiga complementa a nota dela.\n"
         "\n"
         f"Consultar: toque em {BOTAO_INICIO}, embaixo do campo de texto, e depois é só tocar nos botões."
@@ -200,6 +205,27 @@ def get_owner_chat_id() -> int | None:
 
 def _redact(text: str, token: str) -> str:
     return text.replace(token, "<token>") if token else text
+
+
+_TOKEN_NO_TEXTO = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+
+class FiltroDeToken(logging.Filter):
+    """Mascara token de bot em qualquer linha de log, venha de onde vier. O `_redact` só cobre
+    as mensagens do Logos; em 22/09 o aviso de nova tentativa do urllib3 gravou a URL inteira,
+    com o token, no watcher.log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        mensagem = record.getMessage()
+        if _TOKEN_NO_TEXTO.search(mensagem):
+            record.msg, record.args = _TOKEN_NO_TEXTO.sub("<token>", mensagem), None
+        return True
+
+
+def proteger_log(handlers: list[logging.Handler]) -> None:
+    for handler in handlers:
+        handler.addFilter(FiltroDeToken())
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 
 # Uma conexão reaproveitada para todas as chamadas, em vez de uma nova por chamada.
@@ -400,6 +426,11 @@ def _parse_command(text: str) -> tuple[str, str]:
     return name, parts[1].strip() if len(parts) > 1 else ""
 
 
+def _tem_conteudo(manifest: dict) -> bool:
+    """Pacote vale se tem mensagem ou resposta de formulário: um check-in só de botões é entrada."""
+    return bool(manifest.get("mensagens")) or formulario.tem_respostas(manifest)
+
+
 def _starts_with_diario(text: str) -> bool:
     words = text.split()
     return bool(words) and _normalize_word(words[0]) in ("diario", "diarios")
@@ -442,6 +473,7 @@ class Bot:
         # Mensagens "O que procurar?" ainda sem resposta. A resposta a uma delas é busca, não
         # captura — sem isto, o termo viraria nota de complemento da mensagem respondida.
         self.pedidos_busca: set[int] = set()
+        self.fonte_contexto: formulario.FonteContexto = formulario.VaultContexto()
 
     def reply(self, message: dict, text: str) -> None:
         try:
@@ -605,13 +637,15 @@ class Bot:
         inicio = time.monotonic()
         tela, aviso = None, None
         try:
-            if dado == "b":
+            if dado.startswith("f:"):
+                tela = self._tocar_formulario(dado)
+            elif dado == "b":
                 self._pedir_busca(chat_id)
             elif dado.startswith("j"):
                 tela = jobs.cmd_botao(dado)
             else:
                 tela = consulta.cmd_botao(dado, self.contexto)
-        except (consulta.ConsultaError, jobs.JobError) as e:
+        except (consulta.ConsultaError, jobs.JobError, formulario.FormError) as e:
             aviso = str(e)
         except Exception:
             logger.exception(f"Telegram: falha no botão {dado.split(':', 1)[0]}")
@@ -649,6 +683,8 @@ class Bot:
             self._consultar(message, command, produzir)
         elif command in JOB_COMMANDS:
             self._job(message, command)
+        elif command in GUIDED_COMMANDS:
+            self._guiado(message, GUIDED_COMMANDS[command], rest)
         elif command in PREFIX_COMMANDS:
             if not rest:
                 self.reply(message, f"Uso: /{command} <texto>")
@@ -659,9 +695,12 @@ class Bot:
                 self.reply(message, "Nenhuma sessão aberta.")
                 return
             name, size = self.session.name, self.session.size
+            vale = _tem_conteudo(self.session.manifest)
             self._close(self.session, "nova")
-            if size == 0:
+            if not vale:
                 self.reply(message, "Sessão vazia descartada.")
+            elif size == 0:
+                self.reply(message, f"Sessão fechada só com o check-in: {name}. A nota sai em seguida.")
             else:
                 self.reply(message, f"Sessão fechada com {size} mensagem(ns): {name}. A nota sai em seguida.")
         else:
@@ -698,6 +737,76 @@ class Bot:
             self.reply(message, "Não consegui listar os jobs. O log do Logos tem o motivo.")
             return
         self.reply_html(message, tela)
+
+    def _guiado(self, message: dict, rota: str, rest: str) -> None:
+        """/diario e /planejamento: abre a janela de pacote já com a rota e manda o formulário.
+
+        Uma sessão comum aberta é fechada antes: misturar a captura solta de agora há pouco
+        com o diário faria a captura cair no diário, ou o diário no Inbox."""
+        self.expire_if_idle()
+        if self.session is not None:
+            self._close(self.session, "nova")
+        session = self._open(message)
+        quando = datetime.fromtimestamp(message["date"])
+        formulario.iniciar(session.manifest, rota, message["message_id"], quando, self.fonte_contexto)
+        self.session = session
+        if rest:
+            self._add(session, message, "texto", None, "", rest)
+        msg_id = self._enviar_form(message["chat"]["id"], formulario.tela(session.manifest), message["message_id"])
+        session.manifest["form"]["msg_id"] = msg_id
+        write_manifest(session.directory, session.manifest)
+
+    def _enviar_form(self, chat_id: int, tela: "consulta.Tela", responder_a: int) -> int | None:
+        params = {
+            "chat_id": chat_id,
+            "text": tela.texto,
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+            "reply_parameters": {"message_id": responder_a, "allow_sending_without_reply": True},
+            "reply_markup": _teclado(tela.botoes),
+        }
+        try:
+            return call(self.token, "sendMessage", **params)["message_id"]
+        except TelegramError as e:
+            if e.code != 400:
+                logger.warning(f"Telegram: falha ao mandar o formulário: {e}")
+                return None
+        params.pop("parse_mode")
+        params["text"] = consulta.sem_tags(params["text"])
+        try:
+            return call(self.token, "sendMessage", **params)["message_id"]
+        except TelegramError as e:
+            logger.warning(f"Telegram: falha ao mandar o formulário: {e}")
+            return None
+
+    def _tocar_formulario(self, dado: str) -> "consulta.Tela":
+        sid, passo, acao = formulario.ler_dado(dado)
+        self.expire_if_idle()
+        session = self.session
+        form = (session.manifest.get("form") or {}) if session else {}
+        if not form or form.get("sid") != sid:
+            raise formulario.FormError("Esse formulário já fechou.")
+        acabou = formulario.aplicar(session.manifest, passo, acao, self.fonte_contexto)
+        # O toque não passa por _add, que é quem renova a janela; sem isto, preencher os botões
+        # devagar deixaria a sessão vencer no meio do formulário.
+        session.last_at = time.time()
+        write_manifest(session.directory, session.manifest)
+        if acabou:
+            tela = formulario.resumo(session.manifest, session.size)
+            self._close(session, "concluido", editar_form=False)
+            return tela
+        return formulario.tela(session.manifest)
+
+    def _fechar_form_na_tela(self, session: Session) -> None:
+        """Fechou por /nova, janela ou outro comando: o formulário vira o resumo, sem botões."""
+        form = session.manifest.get("form") or {}
+        if not form.get("msg_id"):
+            return
+        mensagem = {"chat": {"id": session.manifest.get("chat_id")}, "message_id": form["msg_id"]}
+        try:
+            self._trocar_tela(mensagem, formulario.resumo(session.manifest, session.size))
+        except Exception as e:
+            logger.warning(f"Telegram: não deu para fechar o formulário na tela: {e}")
 
     @staticmethod
     def _classify(message: dict, text: str) -> tuple[str | None, dict | None, str]:
@@ -736,7 +845,8 @@ class Bot:
         aviso = "\n" + DIARIO_AVISO if _starts_with_diario(text or message.get("caption") or "") else ""
 
         reply_to = (message.get("reply_to_message") or {}).get("message_id")
-        if reply_to is not None and not (self.session and reply_to in self.session.ids):
+        form_msg = ((self.session.manifest.get("form") or {}).get("msg_id")) if self.session else None
+        if reply_to is not None and not (self.session and (reply_to in self.session.ids or reply_to == form_msg)):
             session = self._open(message, reply_to=reply_to)
             self._add(session, message, kind, media, ext, text)
             self._close(session, "resposta")
@@ -747,6 +857,11 @@ class Bot:
         if opened:
             self.session = self._open(message)
         self._add(self.session, message, kind, media, ext, text)
+        if formulario.ativo(self.session.manifest):
+            n = formulario.pergunta_atual(self.session.manifest)
+            ack = f"{label.capitalize()} · na pergunta {n}" if n else f"{label.capitalize()} · na entrada"
+            self.reply(message, ack)
+            return
         if opened:
             ack = (
                 f"{label.capitalize()} · sessão aberta ({self.session.name}). "
@@ -806,6 +921,9 @@ class Bot:
         links = _links(message)
         if links:
             entry["links"] = links
+        pergunta = formulario.pergunta_atual(session.manifest)
+        if pergunta:
+            entry["pergunta"] = pergunta
 
         session.manifest["mensagens"].append(entry)
         session.last_at = time.time()
@@ -813,11 +931,13 @@ class Bot:
         logger.info(f"Telegram: {kind} adicionado a {session.name}")
         return True
 
-    def _close(self, session: Session, reason: str) -> None:
+    def _close(self, session: Session, reason: str, editar_form: bool = True) -> None:
         if session is self.session:
             self.session = None
-        if not session.manifest["mensagens"]:
-            # sessão aberta cuja primeira mensagem falhou: não há o que virar nota
+        if editar_form and formulario.ativo(session.manifest):
+            self._fechar_form_na_tela(session)
+        if not _tem_conteudo(session.manifest):
+            # sessão aberta cuja primeira mensagem falhou, ou formulário sem nenhuma resposta
             logger.info(f"Telegram: sessão vazia descartada: {session.name}")
             shutil.rmtree(session.directory, ignore_errors=True)
             return
@@ -842,7 +962,7 @@ class Bot:
         closed = []
         for directory in sorted(p for p in root.iterdir() if p.is_dir()):
             manifest = load_manifest(directory)
-            if not manifest or not manifest.get("mensagens"):
+            if not manifest or not _tem_conteudo(manifest):
                 logger.warning(f"Telegram: pacote vazio descartado do staging: {directory.name}")
                 shutil.rmtree(directory, ignore_errors=True)
                 continue

@@ -239,6 +239,9 @@ def run():
     if sys.stdout is not None:
         handlers.append(logging.StreamHandler(sys.stdout))
 
+    from .telegram import proteger_log
+
+    proteger_log(handlers)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",

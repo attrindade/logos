@@ -185,7 +185,7 @@ def enrich(transcript: str, route: Route, model: str = None) -> dict:
 # YAML lê como lista aninhada ([["PPJ"]]) e o writer despejaria como `- - - PPJ`.
 _LIST_FIELDS = (
     "tags", "pessoas", "projetos", "acoes", "decisoes", "bloqueios", "vitorias",
-    "gratidao", "tensoes", "pontos", "takeaways",
+    "gratidao", "tensoes", "pontos", "takeaways", "fica_de_fora",
 )
 _ENTITY_FIELDS = ("pessoas", "projetos")
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]|]+)(?:\|[^\[\]]*)?\]\]")
@@ -264,6 +264,9 @@ def normalize_enrichment(data: dict) -> dict:
         elif field in _ENTITY_FIELDS:
             items = [_canonical_entity(i, known) for i in items]
         result[field] = _dedupe(items)
+    if "foco" in result:
+        foco = _flatten(result["foco"], as_wikilink=True)
+        result["foco"] = _canonical_entity(foco[0], known) if foco else ""
     return result
 
 

@@ -56,14 +56,17 @@ def vault_link(path: Path) -> str:
         return Path(path).name
 
 
-def _attachment_folder(recorded_at: datetime) -> Path:
-    return config.NOTES_DIR / "anexos" / f"{recorded_at:%Y}" / f"{recorded_at:%m}"
+def _attachment_folder(recorded_at: datetime, route: Route | None = None) -> Path:
+    # Anexo do diário mora dentro de Diario/: herda o .gitignore, a exclusão do MCP e a
+    # allowlist do bot. Em capturas/anexos/ o PDF e o sidecar dele iriam para o GitHub.
+    base = config.NOTES_DIR / Route.DIARIO.value if route == Route.DIARIO else config.NOTES_DIR
+    return base / "anexos" / f"{recorded_at:%Y}" / f"{recorded_at:%m}"
 
 
-def store_attachment(source: Path, recorded_at: datetime, n: int) -> Path:
+def store_attachment(source: Path, recorded_at: datetime, n: int, route: Route | None = None) -> Path:
     """Copia o anexo para `anexos/YYYY/MM/YYYY-MM-DD_HH-MM-SS_n.<ext>`. Reaproveita a cópia de uma
     tentativa anterior do mesmo pacote (mesmo tamanho); nome ocupado por outro arquivo ganha sufixo."""
-    folder = _attachment_folder(recorded_at)
+    folder = _attachment_folder(recorded_at, route)
     folder.mkdir(parents=True, exist_ok=True)
     stem, suffix = f"{recorded_at:%Y-%m-%d_%H-%M-%S}_{n}", source.suffix.lower()
     dest, k = folder / f"{stem}{suffix}", 2
@@ -81,8 +84,8 @@ def write_sidecar(attachment: Path, text: str) -> Path:
     return sidecar
 
 
-def write_link_sidecar(url: str, title: str, text: str, recorded_at: datetime, n: int) -> Path:
-    folder = _attachment_folder(recorded_at)
+def write_link_sidecar(url: str, title: str, text: str, recorded_at: datetime, n: int, route: Route | None = None) -> Path:
+    folder = _attachment_folder(recorded_at, route)
     folder.mkdir(parents=True, exist_ok=True)
     sidecar = folder / f"{recorded_at:%Y-%m-%d_%H-%M-%S}_{n}.link.md"
     header = _yaml_frontmatter({"tipo": "sidecar", "url": url, "titulo": title})

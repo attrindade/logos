@@ -71,9 +71,11 @@ def test_texto_longo_passa_pela_llm(env):
     _, llm, _ = _run(path, env, {"titulo": "Plano", "tags": ["x"], "categoria": "insight"})
 
     llm.assert_called_once()
-    fm = _frontmatter(config.NOTES_DIR / "Planejamento" / "2026-09-14_16-00-00 - Plano.md")
-    assert fm["canal"] == "syncthing"
+    nota = config.NOTES_DIR / "Planejamento" / "Plano — 2026-09-14.md"
+    fm = _frontmatter(nota)
     assert fm["modelo_llm"] == config.LLM_MODEL
+    assert fm["entradas"] == 1 and fm["para"] == "2026-09-14"
+    assert "via gravador" in nota.read_text(encoding="utf-8")
 
 
 def test_categoria_da_regra_prevalece_sobre_a_llm(env):
@@ -110,9 +112,11 @@ def test_audio_curto_leva_duracao_ao_aw_e_modelo_stt(env):
         process_file(path, env)
 
     llm.assert_not_called()
-    fm = _frontmatter(config.NOTES_DIR / "Diario" / "2026-09-14_17-00-00 - diário hoje foi bom.md")
-    assert fm["fonte_tipo"] == "audio" and fm["modelo_stt"] == config.WHISPER_MODEL_SIZE
+    nota = config.NOTES_DIR / "Diario" / "Diário — 2026-09-14.md"
+    fm = _frontmatter(nota)
+    assert fm["tipo"] == "diario" and fm["horas"] == ["17:00"]
     assert "categoria" not in fm
+    assert "diário hoje foi bom" in nota.read_text(encoding="utf-8")
     assert aw.call_args.kwargs["duracao_audio_s"] == 12.3
 
 

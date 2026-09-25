@@ -3,16 +3,17 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import aw, config, extractors
+from . import aw, config, extractors, formulario
+from . import dia as dia_mod
 from .ledger import Entry, Ledger, State
 from .llm import enrich, is_long_recording, recording_enrichment, short_enrichment
 from .status import PipelineStage, tracker
 from .stt import transcribe_file
-from .triage import is_bundle_name, is_ignored, is_text_file, triage
+from .triage import Route, Triage, _normalize_word, is_bundle_name, is_ignored, is_text_file, triage
 from .writer import (
     IMAGE_EXTS,
     append_to_note,
@@ -87,6 +88,99 @@ def _notify_note_ready(route: str, note_path: Path, enrichment: dict, tipo: str 
         telegram.notify(chr(10).join(partes))
     except Exception as e:
         logger.warning(f"Não deu para devolver a nota de {note_path.name}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Nota por dia (Diário e Planejamento)
+# ---------------------------------------------------------------------------
+
+_ROTAS_DO_DIA = (Route.DIARIO, Route.PLANEJAMENTO)
+_ROTA_DO_MANIFEST = {"diario": Route.DIARIO, "planejamento": Route.PLANEJAMENTO}
+_CAMPOS_DA_ENTRADA = (
+    "titulo", "tags", "humor", "resumo", "proxima_acao", "acoes", "decisoes", "bloqueios",
+    "vitorias", "gratidao", "tensoes", "pontos", "takeaways", "foco", "intencao", "blocos",
+    "fica_de_fora", "amanha", "pessoas", "projetos",
+)
+
+
+def _fala_diz_amanha(fala: str) -> bool:
+    """'planejamento amanhã ...' ou 'planejamento para amanhã ...' é plano do dia seguinte."""
+    return any(_normalize_word(p) == "amanha" for p in fala.split()[1:3])
+
+
+def _dia_da_entrada(t: Triage, manifest: dict | None = None, fala: str = "") -> date:
+    valor = (manifest or {}).get("para") or (manifest or {}).get("dia")
+    if valor:
+        try:
+            return date.fromisoformat(valor)
+        except ValueError:
+            pass
+    dia = dia_mod.dia_logico(t.recorded_at)
+    if t.route == Route.PLANEJAMENTO and _fala_diz_amanha(fala):
+        dia += timedelta(days=1)
+    return dia
+
+
+def _registrar_no_dia(
+    t: Triage, dia: date, fonte: str, origem: str, texto_md: str, enrichment: dict, llm_model: str,
+    tipo: str | None, degradado: str, respostas: dict | None = None, carregar: dict | None = None,
+    anexos: list[dict] | None = None, local: dict | None = None,
+) -> tuple[dia_mod.Registro, dict]:
+    dados = {
+        "fonte": fonte,
+        "momento": t.recorded_at.isoformat(timespec="seconds"),
+        "hora": f"{t.recorded_at:%H:%M}",
+        "origem": origem,
+        "formulario": respostas or {},
+        "carregar": carregar or {},
+        "enriquecimento": {k: enrichment[k] for k in _CAMPOS_DA_ENTRADA if enrichment.get(k) not in (None, "", [], {})},
+        "modelo_llm": llm_model,
+        "degradado": degradado,
+        "tipo": tipo or "",
+    }
+    dados = {k: v for k, v in dados.items() if v not in ("", {}, None) or k in ("fonte", "hora")}
+    registro = dia_mod.registrar_entrada(t.route, dia, dados, texto_md, anexos, local)
+    if t.route == Route.DIARIO and (respostas or {}).get("plano_cumprido"):
+        try:
+            dia_mod.marcar_cumprido(dia, respostas["plano_cumprido"])
+        except Exception as e:
+            logger.warning(f"Não deu para marcar o plano de {dia} como conferido: {e}")
+    return registro, dados
+
+
+def _notify_dia(route: Route, dia: date, registro: dia_mod.Registro, dados: dict) -> None:
+    """Devolutiva da entrada. Do diário sai só a confirmação: nem título, nem uma linha da fala."""
+    try:
+        from . import telegram
+        rotulo = dia_mod.rotulo_dia(dia)
+        if route == Route.DIARIO:
+            texto = "Logos: diário registrado."
+            if registro.total > 1:
+                texto = f"Logos: diário registrado (entrada {registro.numero} de {rotulo})."
+            if registro.aviso:
+                texto += chr(10) + registro.aviso
+            telegram.notify(texto)
+            return
+        enr = dados.get("enriquecimento") or {}
+        partes = [f"Logos: plano para {rotulo}, entrada {registro.numero}"]
+        foco = (dados.get("formulario") or {}).get("foco")
+        if not foco or foco == "outro":
+            foco = enr.get("foco") or ""
+        if foco:
+            partes.append(f"Foco: {foco}")
+        if enr.get("intencao"):
+            partes.append(f"A UMA coisa: {enr['intencao']}")
+        if enr.get("proxima_acao"):
+            partes.append(f"Próxima ação: {enr['proxima_acao']}")
+        acoes = enr.get("acoes") or []
+        if isinstance(acoes, list) and acoes:
+            partes.append("Ações: " + "; ".join(str(a) for a in acoes[:3]))
+        partes.append(registro.caminho.name)
+        if registro.aviso:
+            partes.append(registro.aviso)
+        telegram.notify(chr(10).join(partes))
+    except Exception as e:
+        logger.warning(f"Não deu para devolver a entrada de {registro.caminho.name}: {e}")
 
 
 def process_path(path: Path, ledger: Ledger) -> None:
@@ -236,10 +330,17 @@ def process_file(path: Path, ledger: Ledger) -> None:
         details=f"Destino: Notes/{t.route.value}",
     )
 
-    note_path = write_note(
-        path.name, t, transcript, enrichment, llm_model,
-        fonte_tipo=fonte_tipo, tipo=tipo, degradado=degradado,
-    )
+    registro = None
+    if t.route in _ROTAS_DO_DIA:
+        dia = _dia_da_entrada(t, fala=transcript)
+        origem = "telegram" if t.canal == "telegram" else "gravador"
+        registro, dados = _registrar_no_dia(t, dia, path.name, origem, transcript, enrichment, llm_model, tipo, degradado)
+        note_path = registro.caminho
+    else:
+        note_path = write_note(
+            path.name, t, transcript, enrichment, llm_model,
+            fonte_tipo=fonte_tipo, tipo=tipo, degradado=degradado,
+        )
     archive_path = archive_audio(path, t)
 
     ledger.upsert(Entry(
@@ -249,7 +350,10 @@ def process_file(path: Path, ledger: Ledger) -> None:
         archive_path=str(archive_path),
     ))
     logger.info(f"Nota gerada: {note_path}")
-    _notify_note_ready(t.route.value, note_path, enrichment, tipo)
+    if registro is not None:
+        _notify_dia(t.route, dia, registro, dados)
+    else:
+        _notify_note_ready(t.route.value, note_path, enrichment, tipo)
 
     elapsed = time.time() - start_time
     tracker.set_completed(
@@ -358,6 +462,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     )
 
     sections: list[str] = []
+    perguntas: list[int | None] = []  # a pergunta do formulário que cada seção responde
     anexos: list[_Anexo] = []
     links: list[_Link] = []
     triage_text = ""  # primeiro texto, voz ou legenda: decide rota e categoria
@@ -366,6 +471,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     fotos = 0
 
     for m in mensagens:
+        antes = len(sections)
         tipo = m.get("tipo", "")
         legenda = (m.get("legenda") or "").strip()
         arquivo = path / m["arquivo"] if m.get("arquivo") else None
@@ -412,11 +518,16 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
             links.append(_Link(url, title, text))
             sections.append("\n".join(filter(None, [f"[link: {title or url}] {url}", _excerpt(text)])))
 
+        perguntas.extend([m.get("pergunta")] * (len(sections) - antes))
         if not triage_text:
             triage_text = conteudo or legenda
 
-    transcript = "\n\n".join(s for s in sections if s).strip()
     t = triage(path.name, triage_text, fallback=_parse_iso(manifest.get("aberto_em")))
+    rota_fixa = _ROTA_DO_MANIFEST.get(manifest.get("rota") or "")
+    if rota_fixa is not None:
+        # O comando já disse a rota; a primeira palavra não decide nada aqui.
+        t = replace(t, route=rota_fixa, tag=rota_fixa.value, categoria="", prioridade="")
+    transcript = _agrupar(sections, perguntas, manifest.get("rota"), "###")
 
     config.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     transcript_path = config.TRANSCRIPTS_DIR / f"{t.recorded_at:%Y-%m-%d_%H-%M-%S}_{t.route.value}_tg.txt"
@@ -430,13 +541,14 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     n = 0
     for anexo in anexos:
         n += 1
-        dest = store_attachment(anexo.source, t.recorded_at, n)
+        dest = store_attachment(anexo.source, t.recorded_at, n, t.route)
         long_image_text = dest.suffix.lower() in IMAGE_EXTS and len(anexo.text) > 200
         needs_sidecar = anexo.text.strip() and (dest.suffix.lower() not in IMAGE_EXTS or long_image_text)
         stored.append({"path": dest, "sidecar": write_sidecar(dest, anexo.text) if needs_sidecar else None})
     for link in links:
         n += 1
-        sidecar = write_link_sidecar(link.url, link.title, link.text, t.recorded_at, n) if link.text.strip() else None
+        sidecar = (write_link_sidecar(link.url, link.title, link.text, t.recorded_at, n, t.route)
+                   if link.text.strip() else None)
         stored.append({"url": link.url, "titulo": link.title, "sidecar": sidecar})
 
     reply_to = manifest.get("reply_to")
@@ -452,7 +564,10 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         base = triage_text or next((a.text for a in anexos if a.text.strip()), "")
         tipo = None
         degradado = ""
-        if len(transcript.split()) < config.LLM_MIN_WORDS:
+        do_dia = t.route in _ROTAS_DO_DIA
+        if do_dia and not transcript.strip() and not anexos:
+            enrichment, llm_model = {}, ""  # só o check-in do formulário
+        elif len(transcript.split()) < config.LLM_MIN_WORDS:
             enrichment = short_enrichment(base) if base.strip() else {
                 "titulo": _fallback_title(anexos, local), "tags": [], "resumo": "",
             }
@@ -471,20 +586,33 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 message=f"Enriquecendo pacote com IA via Ollama ({config.LLM_MODEL})...",
             )
             llm_model = config.LLM_MODEL
+            texto_llm = "\n\n".join(filter(None, [formulario.contexto_llm(manifest), transcript]))
             try:
-                enrichment = enrich(transcript, t.route)
+                enrichment = enrich(texto_llm, t.route)
             except Exception as e:
                 logger.warning(f"Falha na etapa LLM do pacote {path.name}: {e}. Nota sem enriquecimento.")
                 degradado = _degradation_reason(e)
                 enrichment = short_enrichment(base) if base.strip() else {"titulo": path.name, "tags": [], "resumo": ""}
                 _notify_degraded(path.name, degradado)
-        note_path = write_note(
-            path.name, t, transcript, enrichment, llm_model,
-            fonte_tipo="pacote", anexos=stored, local=local,
-            tipo=tipo, degradado=degradado,
-        )
-        logger.info(f"Nota gerada a partir do pacote {path.name}: {note_path}")
-        _notify_note_ready(route, note_path, enrichment, tipo)
+        if do_dia:
+            dia = _dia_da_entrada(t, manifest, fala=triage_text)
+            registro, dados = _registrar_no_dia(
+                t, dia, path.name, "telegram", _agrupar(sections, perguntas, manifest.get("rota"), "####"),
+                enrichment, llm_model, tipo, degradado,
+                respostas=manifest.get("formulario"), carregar=manifest.get("carregar"),
+                anexos=stored, local=local,
+            )
+            note_path = registro.caminho
+            logger.info(f"Pacote {path.name} somado à nota do dia: {note_path} (entrada {registro.numero})")
+            _notify_dia(t.route, dia, registro, dados)
+        else:
+            note_path = write_note(
+                path.name, t, transcript, enrichment, llm_model,
+                fonte_tipo="pacote", anexos=stored, local=local,
+                tipo=tipo, degradado=degradado,
+            )
+            logger.info(f"Nota gerada a partir do pacote {path.name}: {note_path}")
+            _notify_note_ready(route, note_path, enrichment, tipo)
 
     ledger.upsert(Entry(
         filename=path.name, size=size, state=State.ENRICHED,
@@ -498,6 +626,25 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         started_at, rota=route, canal=t.canal, tipo="pacote",
         duracao_audio_s=duracao_audio_s, processamento_s=elapsed,
     )
+
+
+def _agrupar(sections: list[str], perguntas: list[int | None], rota: str | None, nivel: str) -> str:
+    """Texto do pacote com as respostas sob a pergunta do formulário que estava na tela.
+    O que chegou fora das perguntas vem antes, sem título."""
+    textos = PERGUNTAS_POR_ROTA.get(rota or "")
+    if not textos or not any(perguntas):
+        return "\n\n".join(s for s in sections if s).strip()
+    livres = [s for s, p in zip(sections, perguntas) if s and not p]
+    partes = ["\n\n".join(livres)] if livres else []
+    for n in sorted({p for p in perguntas if p}):
+        respostas = [s for s, p in zip(sections, perguntas) if s and p == n]
+        if respostas:
+            titulo = f"{nivel} {textos[n - 1]}\n\n" if 1 <= n <= len(textos) else ""
+            partes.append(titulo + "\n\n".join(respostas))
+    return "\n\n".join(partes).strip()
+
+
+PERGUNTAS_POR_ROTA = formulario.PERGUNTAS
 
 
 def _fallback_title(anexos: list[_Anexo], local) -> str:

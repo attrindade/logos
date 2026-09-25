@@ -24,6 +24,7 @@ vitorias: []
 gratidao: []
 tensoes: []
 pontos: []
+amanha: "o que o autor disse que muda amanhã, em uma frase; vazio se ele não disse"
 pessoas:
   - "[[Nome]]"
 projetos:
@@ -37,6 +38,8 @@ Regras e Inferência de Entidades:
 - Use [[Wikilinks]] APENAS para entidades que constam no Contexto de Referência acima (pessoas, projetos e times). NUNCA crie wikilink para ferramentas, tecnologias ou conceitos genéricos — escreva Whisper, Windows, inteligência artificial, manifestações como texto simples. Um wikilink para algo que não está na lista aponta para uma nota que não existe e polui o grafo do vault.
 - Não invente fatos que não foram ditos.
 - Não dê conselhos nem terapia — apenas organize e estruture com fidelidade.
+- O texto pode começar com "Check-in informado pelo autor" (humor, energia, sono, estresse numa escala). É o que o próprio autor marcou: use como contexto para o humor, sem repetir os números no resumo.
+- As respostas podem vir sob títulos "### <pergunta>". "O que foi bom hoje" costuma trazer vitórias e gratidão; "O que pesou ou travou", tensões; "O que você leva do dia", pontos e amanha.
 - Se a transcrição for vazia ou mero ruído, retorne os campos vazios ou mínimos.
 
 Transcrição:
