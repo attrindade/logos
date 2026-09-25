@@ -440,6 +440,10 @@ def process_bundle(path: Path, ledger: Ledger) -> None:
         logger.debug(f"Pacote já processado (ledger): {path.name}")
         return
     message_ids = [m["message_id"] for m in manifest.get("mensagens", []) if "message_id" in m]
+    # O comando e a tela do formulário também são desta nota: responder ao "Diário fechado" é o
+    # gesto natural de "mais uma coisa", e sem isto a resposta viraria nota nova no Inbox.
+    form = manifest.get("form") or {}
+    message_ids += [i for i in (form.get("sid"), form.get("msg_id")) if isinstance(i, int) and i not in message_ids]
     try:
         _process_bundle(path, manifest, digest, message_ids, ledger)
     except Exception as e:
@@ -537,23 +541,33 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         PipelineStage.WRITING, filename=path.name, file_size=size, route=t.route.value,
         message="Guardando anexos e sidecars no vault...",
     )
+    reply_to = manifest.get("reply_to")
+    target = ledger.find_by_message_id(reply_to) if reply_to is not None else None
+    if target is not None and not Path(target.note_path).exists():
+        target = None
+    # Anexo de resposta mora junto da nota que ele complementa: uma foto respondendo ao diário,
+    # guardada pela rota da própria resposta (quase sempre Inbox), iria para o git.
+    rota_dos_anexos = t.route
+    if target is not None:
+        try:
+            rota_dos_anexos = Route(target.route)
+        except ValueError:
+            pass
     stored: list[dict] = []
     n = 0
     for anexo in anexos:
         n += 1
-        dest = store_attachment(anexo.source, t.recorded_at, n, t.route)
+        dest = store_attachment(anexo.source, t.recorded_at, n, rota_dos_anexos)
         long_image_text = dest.suffix.lower() in IMAGE_EXTS and len(anexo.text) > 200
         needs_sidecar = anexo.text.strip() and (dest.suffix.lower() not in IMAGE_EXTS or long_image_text)
         stored.append({"path": dest, "sidecar": write_sidecar(dest, anexo.text) if needs_sidecar else None})
     for link in links:
         n += 1
-        sidecar = (write_link_sidecar(link.url, link.title, link.text, t.recorded_at, n, t.route)
+        sidecar = (write_link_sidecar(link.url, link.title, link.text, t.recorded_at, n, rota_dos_anexos)
                    if link.text.strip() else None)
         stored.append({"url": link.url, "titulo": link.title, "sidecar": sidecar})
 
-    reply_to = manifest.get("reply_to")
-    target = ledger.find_by_message_id(reply_to) if reply_to is not None else None
-    if target is not None and Path(target.note_path).exists():
+    if target is not None:
         # Resposta a uma mensagem que já virou nota: complementa aquela nota.
         note_path = Path(target.note_path)
         append_to_note(note_path, stored, transcript, t.recorded_at, local=local)

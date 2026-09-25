@@ -75,6 +75,7 @@ _LINK_MD = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _NEGRITO = re.compile(r"\*\*([^*]+)\*\*")
 _RISCADO = re.compile(r"~~([^~]+)~~")
 _CALLOUT = re.compile(r"^>\s*\[!(\w+)\][-+]?\s*(.*)$")
+_COMENTARIO_HTML = re.compile(r"^\s*<!--.*-->\s*$")
 
 
 class ConsultaError(Exception):
@@ -192,7 +193,9 @@ def limpar(linha: str) -> str:
 def _sem_frontmatter(texto: str) -> list[str]:
     """Linhas do corpo, com as do frontmatter em branco para o número da linha não escorregar.
     Sem isto, `/buscar renato` devolve a linha `description:` da nota em vez do conteúdo dela."""
-    linhas = texto.splitlines()
+    # Comentário HTML de uma linha (os `<!-- logos:entrada {...} -->` das notas do dia) é dado
+    # para máquina: no chat viraria um bloco de JSON, e a busca casaria dentro dele.
+    linhas = ["" if _COMENTARIO_HTML.match(l) else l for l in texto.splitlines()]
     if not linhas or linhas[0].strip() != "---":
         return linhas
     for fim, linha in enumerate(linhas[1:], 1):
@@ -205,7 +208,7 @@ def _corpo(linhas: list[str]) -> str:
     """Junta linhas de conteúdo, tirando separador de tabela e linha em branco repetida."""
     saida, vazias = [], 0
     for bruta in linhas:
-        if _SEPARADOR_TABELA.match(bruta):
+        if _SEPARADOR_TABELA.match(bruta) or _COMENTARIO_HTML.match(bruta):
             continue
         cabecalho = _CABECALHO.match(bruta)
         linha = _sem_emoji(cabecalho.group(2)) if cabecalho else limpar(bruta)

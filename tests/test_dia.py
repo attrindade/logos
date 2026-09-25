@@ -160,6 +160,15 @@ def test_amanha_do_diario(vault):
     assert dia.amanha_do_diario(HOJE) == "começar cedo · sem celular na cama"
 
 
+def test_consulta_nao_mostra_os_comentarios_da_nota_do_dia(vault):
+    from logos import consulta
+    r = dia.registrar_entrada(Route.PLANEJAMENTO, HOJE, _entrada("a", acoes=["Revisar SIOP"]), "fala")
+    nota = consulta.Nota(r.caminho, r.caminho.read_text(encoding="utf-8"))
+    renderizado = "\n".join([nota.intro] + [consulta._corpo(linhas) for _, linhas in nota.secoes])
+    assert "Revisar SIOP" in renderizado and "logos:" not in renderizado and '"fonte"' not in renderizado
+    assert not any("logos:" in l for l in consulta._sem_frontmatter(r.caminho.read_text(encoding="utf-8")))
+
+
 def test_comentario_nao_quebra_com_seta_no_texto(vault):
     r = dia.registrar_entrada(Route.DIARIO, HOJE, _entrada("a", pontos=["a --> b"]), "")
     assert dia.ler_entradas(Route.DIARIO, HOJE)[0]["enriquecimento"]["pontos"] == ["a --> b"]
@@ -257,6 +266,24 @@ def test_plano_do_formulario_vai_para_o_dia_escolhido_com_trazidas(vault, tmp_pa
     assert fm["para"] == "2026-09-25" and fm["foco"] == "[[Climatizando]]"
     assert "- [ ] Ligar para a Lorena (trazida de qua 24/09)" in texto
     assert "Plano — 2026-09-25.md" in avisos.call_args.args[0] and "Foco: [[Climatizando]]" in avisos.call_args.args[0]
+
+
+def test_resposta_ao_diario_guarda_o_anexo_dentro_de_diario(vault, tmp_path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    pasta = _pacote("2026-09-24 21-40-00 tg 7", [{"message_id": 8, "tipo": "texto", "texto": "dia bom"}],
+                    rota="diario", dia="2026-09-24", form={"sid": 7, "msg_id": 77}, formulario={"humor_nota": 4})
+    _rodar(pasta, ledger)
+    resposta = _pacote("2026-09-24 22-10-00 tg 90", [
+        {"message_id": 90, "tipo": "foto", "arquivo": "90.jpg", "reply_to": 77, "legenda": "a foto do dia"},
+    ], files={"90.jpg": b"img"}, reply_to=77)  # respondeu à tela "Diário fechado"
+
+    with patch("logos.extractors.image_text", return_value="texto longo da foto " * 20):
+        _rodar(resposta, ledger)
+
+    dentro = config.NOTES_DIR / "Diario" / "anexos" / "2026" / "09"
+    assert (dentro / "2026-09-24_22-10-00_1.jpg").exists()
+    assert not (config.NOTES_DIR / "anexos").exists() and not (config.NOTES_DIR / "Inbox").exists()
+    assert "a foto do dia" in dia.caminho_nota(Route.DIARIO, HOJE).read_text(encoding="utf-8")
 
 
 def test_audio_do_gravador_soma_na_nota_do_dia_e_planejamento_amanha(vault, tmp_path):
