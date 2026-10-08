@@ -161,10 +161,26 @@ def triage_category_from_text(transcript: str) -> tuple[str, str]:
     return categoria, prioridade
 
 
+def route_from_filename(filename) -> Route | None:
+    """Rota declarada no nome do arquivo, quando houver.
+
+    O gravador Grava escreve o tipo no nome ("2026-10-07 22-30-00 diario.m4a"). Um Diário
+    gravado ali sem dizer "diário" no começo cairia na Inbox, e a nota pronta (título e ações)
+    iria para o Telegram — exatamente o que a decisão do Diário 100% local proíbe. Por isso o
+    nome manda sobre a fala, e só para o Diário: os outros tipos seguem pela primeira palavra.
+    """
+    m = _name_match(filename)
+    words = (m.group("tag") or "").split() if m else []
+    if words and _normalize_word(words[0]) in ("diario", "diarios"):
+        return Route.DIARIO
+    return None
+
+
 def triage(filename: str, transcript: str = "", fallback: datetime | None = None) -> Triage:
-    """Realiza a triagem combinando o timestamp do arquivo e a rota pelo conteúdo falado."""
+    """Realiza a triagem combinando o timestamp do arquivo e a rota pelo conteúdo falado
+    (ou pelo nome do arquivo, quando ele declara o Diário)."""
     recorded_at = triage_from_filename(filename, fallback)
-    route = triage_route_from_text(transcript)
+    route = route_from_filename(filename) or triage_route_from_text(transcript)
     categoria, prioridade = triage_category_from_text(transcript) if route == Route.INBOX else ("", "")
     return Triage(
         route=route, recorded_at=recorded_at, tag=route.value,
