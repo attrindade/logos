@@ -109,7 +109,7 @@ AW_HOST = os.getenv("LOGOS_AW_HOST") or _user_cfg.get("aw_host", "127.0.0.1")
 AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
 
 # ---------------------------------------------------------
-# Relógio (Huawei Watch Fit 3 via Gadgetbridge)
+# Relógio (Huawei Watch Fit, modelo TIA-B09, via Gadgetbridge)
 # ---------------------------------------------------------
 # Cópia do banco que a "Exportação automática" do Gadgetbridge grava numa pasta do Syncthing.
 # Sem valor, `python -m logos.relogio` pede --db e não faz nada.

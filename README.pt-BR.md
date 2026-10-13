@@ -165,11 +165,11 @@ Para um fluxo 100% automático:
 
 ---
 
-## ⌚ Relógio (Huawei Watch Fit 3 via Gadgetbridge)
+## ⌚ Relógio (Huawei Watch Fit via Gadgetbridge)
 
 `python -m logos.relogio` lê o banco do [Gadgetbridge](https://gadgetbridge.org) e escreve `atividade/Relógio — YYYY-MM-DD.md` no vault: sono da noite (início, fim, horas dormindo, estágios, vezes que acordou, nota), cochilos, passos e frequência cardíaca (repouso, mínima, máxima). Os números também vão para o frontmatter (`sono_h`, `passos`, `fc_repouso`...), para Bases e para o `/om-weekly`.
 
-1. No celular, o **Gadgetbridge** (F-Droid) substitui o Huawei Saúde no pareamento. O Fit 3 é suportado como experimental.
+1. No celular, o **Gadgetbridge** (F-Droid) substitui o Huawei Saúde no pareamento. O Watch Fit original (modelo TIA-B09, de 2020) foi testado com o Gadgetbridge 0.95.1.
 2. Em *Configurações → Exportação automática*, aponte a exportação do banco para uma pasta do Syncthing e escolha o intervalo (ex.: a cada 1 h). Celular *Send Only*, PC *Receive Only*.
 3. No `logos_config.yaml`, `gadgetbridge_db` aponta para o arquivo exportado e `vault_dir` para o vault.
 4. Rode `python -m logos.relogio` (refaz ontem e hoje). `--dias 30` preenche o mês para trás; `--linha` imprime só a linha do sono, que o briefing das 8h usa.

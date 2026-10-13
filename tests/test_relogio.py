@@ -1,4 +1,4 @@
-"""Leitura do banco do Gadgetbridge (Huawei Watch Fit 3) e nota do dia em atividade/."""
+"""Leitura do banco do Gadgetbridge (Huawei Watch Fit) e nota do dia em atividade/."""
 import sqlite3
 from datetime import date, datetime
 

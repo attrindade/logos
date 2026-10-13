@@ -1,4 +1,4 @@
-"""Sono, passos e frequência cardíaca do Huawei Watch Fit 3, lidos do banco do Gadgetbridge.
+"""Sono, passos e frequência cardíaca do Huawei Watch Fit (modelo TIA-B09), lidos do banco do Gadgetbridge.
 
 O Gadgetbridge substitui o app Huawei Saúde no celular e guarda tudo num SQLite local. O
 "Exportação automática" dele grava uma cópia do banco numa pasta que o Syncthing traz para o PC,
@@ -297,7 +297,7 @@ def _linha_sono(rotulo: str, s: Sono) -> str:
 def _frontmatter(dia: Dia, agora: datetime) -> dict:
     fm: dict = {
         "date": dia.data.isoformat(),
-        "description": f"Relógio (Huawei Watch Fit 3) em {dia.data.isoformat()}: sono da noite, "
+        "description": f"Relógio (Huawei Watch Fit) em {dia.data.isoformat()}: sono da noite, "
                        f"cochilos, passos e frequência cardíaca, lidos do Gadgetbridge.",
         "tags": ["atividade", "relogio", "private"],
         "fonte": "gadgetbridge",
