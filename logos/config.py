@@ -109,6 +109,14 @@ AW_HOST = os.getenv("LOGOS_AW_HOST") or _user_cfg.get("aw_host", "127.0.0.1")
 AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
 
 # ---------------------------------------------------------
+# Relógio (Huawei Watch Fit 3 via Gadgetbridge)
+# ---------------------------------------------------------
+# Cópia do banco que a "Exportação automática" do Gadgetbridge grava numa pasta do Syncthing.
+# Sem valor, `python -m logos.relogio` pede --db e não faz nada.
+_raw_gb_db = os.getenv("LOGOS_GADGETBRIDGE_DB") or _user_cfg.get("gadgetbridge_db")
+GADGETBRIDGE_DB = Path(_raw_gb_db).expanduser() if _raw_gb_db else None
+
+# ---------------------------------------------------------
 # Telegram, anexos e OCR
 # ---------------------------------------------------------
 # Mensagens com menos que isso entre si formam um pacote (uma nota).

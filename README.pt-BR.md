@@ -165,6 +165,19 @@ Para um fluxo 100% automático:
 
 ---
 
+## ⌚ Relógio (Huawei Watch Fit 3 via Gadgetbridge)
+
+`python -m logos.relogio` lê o banco do [Gadgetbridge](https://gadgetbridge.org) e escreve `atividade/Relógio — YYYY-MM-DD.md` no vault: sono da noite (início, fim, horas dormindo, estágios, vezes que acordou, nota), cochilos, passos e frequência cardíaca (repouso, mínima, máxima). Os números também vão para o frontmatter (`sono_h`, `passos`, `fc_repouso`...), para Bases e para o `/om-weekly`.
+
+1. No celular, o **Gadgetbridge** (F-Droid) substitui o Huawei Saúde no pareamento. O Fit 3 é suportado como experimental.
+2. Em *Configurações → Exportação automática*, aponte a exportação do banco para uma pasta do Syncthing e escolha o intervalo (ex.: a cada 1 h). Celular *Send Only*, PC *Receive Only*.
+3. No `logos_config.yaml`, `gadgetbridge_db` aponta para o arquivo exportado e `vault_dir` para o vault.
+4. Rode `python -m logos.relogio` (refaz ontem e hoje). `--dias 30` preenche o mês para trás; `--linha` imprime só a linha do sono, que o briefing das 8h usa.
+
+A nota é derivada: cada execução a refaz a partir do banco, e chaves de frontmatter que não são do módulo ficam como estão. `atividade/` fica fora do git, do `om` e da allowlist do bot, como o resto dos dados de comportamento.
+
+---
+
 ## 📂 Estrutura de Arquivos
 
 ```
@@ -183,6 +196,7 @@ logos/
 ├── consulta.py           # Leitura do vault pelo chat (/ver, /buscar, /hoje)
 ├── extractors.py         # OCR, visão, PDF, .docx e links dos anexos
 ├── aw.py                 # Evento no ActivityWatch por captura
+├── relogio.py            # Sono, passos e FC do relógio (banco do Gadgetbridge) → atividade/
 └── prompts/              # Prompts por rota (Diario, Planejamento, Inbox)
 
 setup.py                  # Instalador e configurador TUI interativo
@@ -209,4 +223,5 @@ ollama_keep_alive: "10m"   # mantém o modelo carregado entre notas
 llm_model: "gemma4:e4b"    # opcional: gemma4:26b
 llm_min_words: 40          # notas mais curtas pulam a LLM (título = 8 primeiras palavras)
 archive_retention_days: 60
+gadgetbridge_db: "~/Sync/gadgetbridge/Gadgetbridge"  # opcional: cópia exportada pelo Gadgetbridge
 ```
