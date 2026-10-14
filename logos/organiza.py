@@ -439,6 +439,9 @@ def main() -> None:
     inbox = args.inbox or config.INBOX_DIR
     oficina = config.STATE_DIR / "organiza" / "montando"
     ultima_ida = 0.0
+    if args.inbox is None and not args.uma_vez:
+        from . import dia_celular
+        dia_celular.iniciar(key)  # as falas do Planeja têm laço próprio, de 15 s
     while True:
         try:
             novas, notas = passo(key, inbox, oficina, config.LEDGER_PATH)
@@ -455,7 +458,6 @@ def main() -> None:
         if args.inbox is None:
             fila_ao_celular(key)
             pedidos_do_celular(key)
-            dia_do_celular(key)
             if time.time() - ultima_ida >= IDA_S:
                 ultima_ida = time.time()
                 ida_ao_celular(key)
@@ -483,17 +485,6 @@ def pedidos_do_celular(key: str) -> None:
             logger.info(f"Pedidos do celular: {n} disparado(s)")
     except Exception as e:
         logger.warning(f"Pedidos do celular: volta falhou: {e}")
-
-
-def dia_do_celular(key: str) -> None:
-    """Falas do Planeja ("Como está indo?", "Fechar o dia"): o Claude pensa numa thread própria."""
-    from . import dia_celular
-    try:
-        n = dia_celular.passo(key)
-        if n:
-            logger.info(f"Dia do celular: {n} fala(s) para pensar")
-    except Exception as e:
-        logger.warning(f"Dia do celular: volta falhou: {e}")
 
 
 def ida_ao_celular(key: str) -> None:

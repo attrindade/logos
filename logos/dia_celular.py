@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -304,6 +305,27 @@ def _atender_todas(key: str, falas: list[dict]) -> None:
                     pass
     finally:
         _trabalhando.release()
+
+
+INTERVALO_S = 15
+
+
+def iniciar(key: str) -> threading.Thread:
+    """Laço próprio, mais curto que a volta do drenador (60 s mais WhatsApp e vault): a fala
+    é de quem está no meio do dia esperando a resposta."""
+    def laco() -> None:
+        while True:
+            try:
+                n = passo(key)
+                if n:
+                    logger.info(f"Dia do celular: {n} fala(s) para pensar")
+            except Exception as e:  # rede fora, Semana fora: tenta de novo na próxima volta
+                logger.warning(f"Dia do celular: volta falhou: {e}")
+            time.sleep(INTERVALO_S)
+
+    t = threading.Thread(target=laco, name="planeja-espera", daemon=True)
+    t.start()
+    return t
 
 
 def passo(key: str) -> int:
