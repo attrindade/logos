@@ -531,7 +531,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     if rota_fixa is not None:
         # O comando já disse a rota; a primeira palavra não decide nada aqui.
         t = replace(t, route=rota_fixa, tag=rota_fixa.value, categoria="", prioridade="")
-    transcript = _agrupar(sections, perguntas, manifest.get("rota"), "###")
+    transcript = _agrupar(sections, perguntas, manifest.get("rota"), "###", manifest.get("perguntas"))
 
     config.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     transcript_path = config.TRANSCRIPTS_DIR / f"{t.recorded_at:%Y-%m-%d_%H-%M-%S}_{t.route.value}_tg.txt"
@@ -611,7 +611,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         if do_dia:
             dia = _dia_da_entrada(t, manifest, fala=triage_text)
             registro, dados = _registrar_no_dia(
-                t, dia, path.name, "telegram", _agrupar(sections, perguntas, manifest.get("rota"), "####"),
+                t, dia, path.name, "telegram", _agrupar(sections, perguntas, manifest.get("rota"), "####", manifest.get("perguntas")),
                 enrichment, llm_model, tipo, degradado,
                 respostas=manifest.get("formulario"), carregar=manifest.get("carregar"),
                 anexos=stored, local=local,
@@ -642,10 +642,15 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     )
 
 
-def _agrupar(sections: list[str], perguntas: list[int | None], rota: str | None, nivel: str) -> str:
+def _agrupar(sections: list[str], perguntas: list[int | None], rota: str | None, nivel: str,
+             proprias=None) -> str:
     """Texto do pacote com as respostas sob a pergunta do formulário que estava na tela.
-    O que chegou fora das perguntas vem antes, sem título."""
-    textos = PERGUNTAS_POR_ROTA.get(rota or "")
+    O que chegou fora das perguntas vem antes, sem título. `proprias`: os títulos que o pacote
+    trouxe (o Diário curto do app Organiza tem perguntas suas); senão, as do bot para a rota."""
+    if isinstance(proprias, list) and proprias and all(isinstance(t, str) for t in proprias):
+        textos = tuple(proprias)
+    else:
+        textos = PERGUNTAS_POR_ROTA.get(rota or "")
     if not textos or not any(perguntas):
         return "\n\n".join(s for s in sections if s).strip()
     livres = [s for s, p in zip(sections, perguntas) if s and not p]

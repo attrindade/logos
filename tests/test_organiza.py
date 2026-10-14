@@ -250,3 +250,47 @@ def test_chave_publicada_diferente_e_avisada(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: {"linhas": {"cofre": {"dados": {"pub": outra}}}})
     assert organiza.conferir_chave_publicada("k") is False
     assert "NÃO É A DESTE PC" in caplog.text
+
+
+def test_diario_curto_leva_escalas_ao_formulario_e_pergunta_a_cada_resposta(tmp_path, monkeypatch):
+    from logos import cofre
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    chave = cofre.carregar_ou_criar()
+    pub = cofre.publica_b64(chave)
+
+    def selada(pid, dentro):
+        return {"id": pid, "ordem": int(pid[1:]), "tipo": "cifrada", "criada_em": f"2026-10-14T21:0{pid[1:]}:00",
+                "audio": json.dumps(cofre.selar(json.dumps(dentro).encode(), pid, pub))}
+
+    escalas = {"tipo": "texto", "texto": "Humor 4 · Energia 2 · Estresse médio",
+               "escalas": {"humor_nota": 4, "energia": 2, "estresse": "médio", "sono": "<5h", "x": 1}}
+    captura = dict(_captura("diario"), id="diario-curto-01", partes=[
+        selada("d0", escalas),
+        selada("d1", {"tipo": "texto", "texto": "a reunião rendeu", "pergunta": 1}),
+        selada("d2", {"tipo": "texto", "texto": "cansaço", "pergunta": 2}),
+        selada("d3", {"tipo": "texto", "texto": "solto", "pergunta": 9}),  # fora da lista: vai sem título
+    ])
+    abertas = organiza.abrir_partes(captura, None, chave)
+    m = organiza.manifest_de(dict(abertas, tipo="diario"), {})
+    # só os campos e valores que o /diario aceita; o texto das escalas não vira resposta
+    assert m["formulario"] == {"humor_nota": 4, "energia": 2, "estresse": "médio"}
+    assert [x.get("pergunta") for x in m["mensagens"]] == [1, 2, None]
+    assert m["perguntas"] == list(organiza.PERGUNTAS_DIARIO)
+    assert "Humor 4" not in json.dumps(m["mensagens"], ensure_ascii=False)
+
+
+def test_drenador_antigo_le_as_escalas_como_texto():
+    # O envelope das escalas tem "texto": quem não conhece "escalas" ainda entrega algo legível.
+    m = organiza.manifest_de(dict(_captura("diario"), partes=[
+        {"id": "d0", "ordem": 0, "tipo": "texto", "texto": "Humor 4 · Energia 2 · Estresse médio"}]), {})
+    assert m["mensagens"][0]["texto"].startswith("Humor 4")
+    assert "formulario" not in m and "perguntas" not in m
+
+
+def test_agrupar_usa_as_perguntas_do_pacote_quando_vem():
+    secoes = ["livre", "boa", "pesou"]
+    texto = pipeline._agrupar(secoes, [None, 1, 2], "diario", "###", ["Pergunta A", "Pergunta B"])
+    assert texto == "livre\n\n### Pergunta A\n\nboa\n\n### Pergunta B\n\npesou"
+    # sem lista própria (ou com lixo), ficam as do bot
+    bot = pipeline._agrupar(["boa"], [1], "diario", "###", [3])
+    assert bot.startswith("### " + pipeline.PERGUNTAS_POR_ROTA["diario"][0])

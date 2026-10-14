@@ -63,6 +63,30 @@ def nome_pacote(captura: dict) -> str:
     return f"{data} {hora.replace(':', '-')} {TAG} {curto}"
 
 
+# O Diário curto do app (escolhido por ele em 14/10). O app manda o número da pergunta dentro do
+# envelope e o título sai daqui: a mesma lista está em `Anotacoes.PERGUNTAS_DIARIO` no app.
+PERGUNTAS_DIARIO = (
+    "Uma coisa boa de hoje, e por que ela aconteceu?",
+    "O que pesou ou travou? Que nome você dá ao que sentiu?",
+    "O que ficou aberto na cabeça? (lista rápida)",
+    "Amanhã, a primeira coisa: o quê, a que horas e onde você começa?",
+)
+# As escalas que o app manda, com os valores que o /diario do bot grava (formulario.ESCALAS).
+_ESCALAS_VALIDAS = {
+    "humor_nota": {1, 2, 3, 4, 5},
+    "energia": {1, 2, 3, 4, 5},
+    "estresse": {"baixo", "médio", "alto"},
+}
+
+
+def _escalas(bruto) -> dict:
+    """Só o que o /diario aceitaria: campo conhecido e valor da lista. O resto cai fora calado."""
+    if not isinstance(bruto, dict):
+        return {}
+    return {k: v for k, v in bruto.items() if k in _ESCALAS_VALIDAS and not isinstance(v, bool)
+            and v in _ESCALAS_VALIDAS[k]}
+
+
 def eh_diario(captura: dict) -> bool:
     """Decidido aqui, pelo conteúdo, não só pelo campo "tipo" da nuvem: quem mexesse no D1 e
     trocasse o tipo faria o título do Diário voltar à Semana em texto puro."""
@@ -86,6 +110,12 @@ def abrir_partes(captura: dict, audio, chave) -> dict:
             q["audio"], q["mime"] = dentro["audio"], dentro.get("mime", "audio/mp4")
         else:
             q["texto"] = dentro.get("texto", "")
+        n = dentro.get("pergunta")
+        if isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= len(PERGUNTAS_DIARIO):
+            q["pergunta"] = n
+        esc = _escalas(dentro.get("escalas"))
+        if esc:
+            q["escalas"] = esc
         abertas.append(q)
     return dict(captura, partes=abertas)
 
@@ -94,11 +124,20 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
     """Manifest no formato do bot. O tipo escolhido no app vira a primeira palavra do primeiro
     texto, que é como o triage fixa a categoria (o mesmo que o /tarefa do bot faz)."""
     mensagens = []
+    formulario: dict = {}
     for p in sorted(captura.get("partes", []), key=lambda p: (p.get("ordem", 0), p.get("criada_em", ""))):
+        if p.get("escalas"):
+            # Escalas do Diário curto: vão para o formulário (o frontmatter do Diário), não para o texto.
+            formulario.update(p["escalas"])
+            continue
         if p.get("tipo") == "texto" and (p.get("texto") or "").strip():
             mensagens.append({"tipo": "texto", "texto": p["texto"].strip(), "quando": p.get("criada_em")})
         elif p.get("tipo") == "voz" and p["id"] in arquivos:
             mensagens.append({"tipo": "voz", "arquivo": arquivos[p["id"]], "quando": p.get("criada_em")})
+        else:
+            continue
+        if p.get("pergunta"):
+            mensagens[-1]["pergunta"] = p["pergunta"]
     palavra = _TIPO_PALAVRA.get(captura.get("tipo", ""))
     if palavra and mensagens:  # nota vazia continua vazia: o tipo sozinho não é conteúdo
         if mensagens and mensagens[0]["tipo"] == "texto":
@@ -115,6 +154,10 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
     }
     if captura.get("tipo") == "diario":
         m["rota"] = "diario"  # o pipeline soma no "Diário — AAAA-MM-DD.md" do dia, como o /diario
+        if formulario:
+            m["formulario"] = formulario
+        if any(x.get("pergunta") for x in mensagens):
+            m["perguntas"] = list(PERGUNTAS_DIARIO)  # títulos das respostas (o /diario do bot tem os dele)
     return m
 
 
