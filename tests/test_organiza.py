@@ -108,3 +108,47 @@ def test_passo_entrega_e_depois_avisa_que_virou_nota(tmp_path, monkeypatch):
     })
     # Avisado uma vez só.
     assert organiza.passo("k", inbox, tmp_path / "m", ledger) == (0, 0)
+
+
+def test_voz_vem_num_pedido_proprio_e_nota_com_defeito_nao_segura_a_fila(tmp_path, monkeypatch):
+    sem_audio = _captura()
+    voz = sem_audio["partes"][1]
+    voz["tem_audio"] = 1
+    b64 = voz.pop("audio")
+    vazia = dict(_captura(), id="vazia-0000000001", partes=[])
+    pedidos = []
+
+    def falso(metodo, url, key, corpo=None):
+        pedidos.append((metodo, url.rsplit("/", 1)[-1], corpo))
+        if url.endswith("/pendentes"):
+            return {"capturas": [vazia, sem_audio]}
+        if "/partes?id=" in url:
+            return {"audio": b64}
+        return {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "ledger.json") == (1, 0)
+    pacote = tmp_path / "Inbox" / "2026-10-14 01-25-11 app f1cd4982"
+    assert (pacote / "01.m4a").read_bytes() == VOZ
+    # A vazia saiu da fila da Semana em vez de ocupar a janela de pendentes.
+    assert ("PUT", "estado", {"id": "vazia-0000000001", "estado": "nota", "titulo": "Sem conteúdo: nada a guardar"}) in pedidos
+
+
+def test_nota_apagada_na_semana_sai_de_entregues(tmp_path, monkeypatch):
+    import urllib.error
+
+    def falso(metodo, url, key, corpo=None):
+        if url.endswith("/pendentes"):
+            return {"capturas": []}
+        raise urllib.error.HTTPError(url, 404, "não existe", {}, None)
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    nota = tmp_path / "nota.md"
+    nota.write_text("---\ntitulo: X\n---\n", encoding="utf-8")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"x": {"filename": "p", "state": "enriched", "note_path": str(nota)}}), encoding="utf-8")
+    organiza._gravar_entregues({"apagada-00000001": "p"})
+    assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", ledger) == (0, 1)
+    assert organiza._ler_entregues() == {}

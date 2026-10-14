@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
         elif p.get("tipo") == "voz" and p["id"] in arquivos:
             mensagens.append({"tipo": "voz", "arquivo": arquivos[p["id"]], "quando": p.get("criada_em")})
     palavra = _TIPO_PALAVRA.get(captura.get("tipo", ""))
-    if palavra:
+    if palavra and mensagens:  # nota vazia continua vazia: o tipo sozinho não é conteúdo
         if mensagens and mensagens[0]["tipo"] == "texto":
             mensagens[0]["texto"] = f"{palavra}: {mensagens[0]['texto']}"
         else:
@@ -87,9 +88,11 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
     }
 
 
-def entregar(captura: dict, inbox: Path, oficina: Path) -> Path:
+def entregar(captura: dict, inbox: Path, oficina: Path, audio=None) -> Path:
     """Monta o pacote fora da Inbox e só então o move para lá, inteiro: o watcher nunca vê um
-    pacote pela metade. Se já foi entregue (queda entre mover e avisar a Semana), não duplica."""
+    pacote pela metade. Se já foi entregue (queda entre mover e avisar a Semana), não duplica.
+    `audio(id_da_parte)` devolve o base64 da voz: a lista de pendentes não traz o áudio (várias
+    vozes juntas estouravam a memória do Worker), então cada uma vem num pedido."""
     nome = nome_pacote(captura)
     destino = inbox / nome
     if (destino / MANIFEST).exists():
@@ -101,11 +104,14 @@ def entregar(captura: dict, inbox: Path, oficina: Path) -> Path:
     arquivos: dict[str, str] = {}
     n = 0
     for p in captura.get("partes", []):
-        if p.get("tipo") != "voz" or not p.get("audio"):
+        if p.get("tipo") != "voz":
+            continue
+        b64 = p.get("audio") or (audio(p["id"]) if audio and p.get("tem_audio") else None)
+        if not b64:
             continue
         n += 1
         arq = f"{n:02d}{_EXT.get(p.get('mime') or '', '.m4a')}"
-        (tmp / arq).write_bytes(base64.b64decode(p["audio"]))
+        (tmp / arq).write_bytes(base64.b64decode(b64))
         arquivos[p["id"]] = arq
     m = manifest_de(captura, arquivos)
     if not m["mensagens"]:
@@ -173,19 +179,41 @@ def resumo_da_nota(nota: Path) -> tuple[str | None, str | None]:
     return (str(titulo) if titulo else None), proxima
 
 
+def _sumiu(e: Exception) -> bool:
+    """404 da Semana: a nota foi apagada lá (pelo app) entre a busca e o aviso."""
+    return isinstance(e, urllib.error.HTTPError) and e.code == 404
+
+
 def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int, int]:
-    """Uma volta: entrega as pendentes e avisa as que viraram nota. Devolve (entregues, notas)."""
+    """Uma volta: entrega as pendentes e avisa as que viraram nota. Devolve (entregues, notas).
+    Cada nota tem o seu try: uma com defeito não segura as outras na fila."""
     entregues = _ler_entregues()
     novas = 0
+
+    def audio(parte_id: str) -> str:
+        return _pedido("GET", f"{URL}/partes?id={parte_id}", key).get("audio") or ""
+
     for c in _pedido("GET", URL + "/pendentes", key).get("capturas", []):
         try:
-            destino = entregar(c, inbox, oficina)
+            destino = entregar(c, inbox, oficina, audio)
         except ValueError as e:
+            # Sem nada para guardar (as partes não chegaram): sai da fila da Semana, senão dez
+            # assim ocupariam a janela de pendentes para sempre.
             logger.warning(f"Organiza: {e}")
+            try:
+                _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "nota", "titulo": "Sem conteúdo: nada a guardar"})
+            except Exception as e2:
+                logger.warning(f"Organiza: não deu para tirar {c['id']} da fila: {e2}")
+            continue
+        except Exception as e:
+            logger.warning(f"Organiza: {c.get('id')} não foi entregue nesta volta: {e}")
             continue
         entregues[c["id"]] = destino.name
         _gravar_entregues(entregues)  # antes de avisar: se a Semana não ouvir, a próxima volta não duplica
-        _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "pc"})
+        try:
+            _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "pc"})
+        except Exception as e:
+            logger.warning(f"Organiza: Semana não ouviu o 'pc' de {c['id']}: {e}")
         novas += 1
         logger.info(f"Organiza: {destino.name} entregue à Inbox")
     notas = 0
@@ -194,7 +222,12 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         if nota is None:
             continue
         titulo, proxima = resumo_da_nota(nota)
-        _pedido("PUT", URL + "/estado", key, {"id": cid, "estado": "nota", "titulo": titulo, "proxima": proxima})
+        try:
+            _pedido("PUT", URL + "/estado", key, {"id": cid, "estado": "nota", "titulo": titulo, "proxima": proxima})
+        except Exception as e:
+            if not _sumiu(e):
+                logger.warning(f"Organiza: Semana não ouviu o 'nota' de {cid}: {e}")
+                continue  # tenta de novo na próxima volta, sem segurar as outras
         del entregues[cid]
         _gravar_entregues(entregues)
         notas += 1
