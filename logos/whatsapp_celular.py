@@ -1,7 +1,9 @@
 """A fila do WhatsApp do Assistente no app Organiza, fechada para o celular (decisão dele em 14/10).
 
-Lê a API local do Assistente (`http://127.0.0.1:8765`, só GET: `/api/fila` e `/api/conversa`, que
-não mudam nada lá), monta a fila com o resumo e até 3 sugestões de resposta de cada conversa, fecha
+Lê a API local do Assistente (`http://127.0.0.1:8765`, só GET: `/api/fila`, `/api/conversa` e
+`/api/historico`, que não mudam nada lá), monta a fila com o resumo, até 3 sugestões de resposta e
+as últimas mensagens (áudio pela transcrição) de cada conversa, mais as respondidas hoje e as
+adiadas, fecha
 com a chave do celular e põe na Semana (`/api/cifrados`, chave "whatsapp"). O Assistente não muda:
 ele continua só com a biblioteca padrão do Python. Responder continua sendo no WhatsApp; o app
 copia a sugestão e abre a conversa.
@@ -25,6 +27,9 @@ logger = logging.getLogger(__name__)
 ASSISTENTE = "http://127.0.0.1:8765"
 URL = organiza.URL.replace("/capturas", "/cifrados")
 MAX_GRUPOS = 10
+MAX_HISTORICO = 10    # respondidas hoje e adiadas, cada
+MAX_MENSAGENS = 25    # por conversa
+MAX_TEXTO = 2000      # por mensagem; o envelope inteiro cabe em 1,5 MB na Semana
 ID = "whatsapp"  # dados associados do envelope: só serve como a fila do WhatsApp
 
 
@@ -46,6 +51,35 @@ def _numero(jid: str) -> str | None:
     return None
 
 
+def _mensagens(conversa: dict) -> list[dict]:
+    """As últimas mensagens da conversa, para ele ver o que foi dito antes de responder (pedido
+    dele em 14/10). Áudio vai pela transcrição; foto, vídeo e documento só pelo tipo e a legenda,
+    sem o arquivo ("os arquivos não precisa ver por ali")."""
+    saida = []
+    for m in (conversa.get("mensagens") or [])[-MAX_MENSAGENS:]:
+        if not isinstance(m, dict):
+            continue
+        tipo = m.get("tipo") or "texto"
+        transcricao = m.get("transcricao") or ""
+        texto = transcricao if tipo == "audio" and transcricao else (m.get("texto") or "")
+        saida.append({
+            "de_mim": bool(m.get("de_mim")),
+            "autor": m.get("autor") or "",
+            "ts": m.get("ts") or 0,
+            "tipo": tipo,
+            "texto": texto[:MAX_TEXTO],
+            "duracao": m.get("duracao_s") or 0,
+            # Áudio ainda sem transcrição: o app diz que ela está a caminho em vez de mostrar vazio.
+            "transcrito": tipo != "audio" or bool(transcricao),
+        })
+    return saida
+
+
+def _conversa(jid: str) -> dict:
+    # Erro de rede aqui sobe (OSError): fila pela metade não substitui a boa na Semana.
+    return _get("/api/conversa?jid=" + urllib.parse.quote(jid))
+
+
 def montar() -> dict:
     fila = _get("/api/fila")
     itens = []
@@ -60,15 +94,36 @@ def montar() -> dict:
                 "previa": it.get("previa") or "",
                 "numero": _numero(it.get("jid", "")),
             }
-            # Erro de rede aqui sobe (OSError): fila pela metade não substitui a boa na Semana.
-            c = _get("/api/conversa?jid=" + urllib.parse.quote(it["jid"]))
+            c = _conversa(it["jid"])
             s = c.get("sugestao") if c.get("sugestao_fresca") else None
             if isinstance(s, dict):
                 item["resumo"] = s.get("resumo") or ""
                 item["sugestoes"] = [{"rotulo": x.get("rotulo", ""), "texto": x.get("texto", "")}
                                      for x in (s.get("sugestoes") or [])[:3] if isinstance(x, dict)]
                 item["falta_saber"] = [str(x) for x in (s.get("falta_saber") or [])[:4]]
+            item["mensagens"] = _mensagens(c)
             itens.append(item)
+    # O que já saiu da fila hoje (respondidas) e o que ele adiou: some da fila ao responder, e sem
+    # isto não dava para conferir o que foi dito nem ver a adiada no celular.
+    hist = _get("/api/historico")
+    vistos = {it.get("jid") for s in ("voce", "rapida", "grupo") for it in (fila.get(s) or [])}
+    for secao, chave, campo_ts in (("respondida", "respondidas", "ts"), ("adiada", "adiadas", "ate")):
+        n = 0
+        for h in sorted(hist.get(chave) or [], key=lambda x: -(x.get(campo_ts) or 0)):
+            jid = h.get("jid") or ""
+            if not jid or jid in vistos or n >= MAX_HISTORICO:
+                continue
+            vistos.add(jid)
+            n += 1
+            itens.append({
+                "secao": secao,
+                "nome": h.get("nome") or "",
+                "novas": 0,
+                "desde": h.get(campo_ts) or 0,
+                "previa": (h.get("texto") or "")[:200],
+                "numero": _numero(jid),
+                "mensagens": _mensagens(_conversa(jid)),
+            })
     return {"itens": itens, "grupos_total": len(fila.get("grupo") or [])}
 
 
