@@ -83,8 +83,8 @@ def _escalas(bruto) -> dict:
     """Só o que o /diario aceitaria: campo conhecido e valor da lista. O resto cai fora calado."""
     if not isinstance(bruto, dict):
         return {}
-    return {k: v for k, v in bruto.items() if k in _ESCALAS_VALIDAS and not isinstance(v, bool)
-            and v in _ESCALAS_VALIDAS[k]}
+    return {k: v for k, v in bruto.items() if k in _ESCALAS_VALIDAS and isinstance(v, (int, str))
+            and not isinstance(v, bool) and v in _ESCALAS_VALIDAS[k]}
 
 
 def eh_diario(captura: dict) -> bool:
@@ -362,27 +362,49 @@ def chave_celular(key: str) -> str | None:
     e, se a publicada mudar, nada é fechado para a nova e o log avisa. Celular trocado ou app
     reinstalado do zero: confira a impressão no app e apague o `celular.pub` para fixar a nova.
     """
+    agora = time.time()
+    if _CEL_CACHE["ate"] > agora:  # a fila do WhatsApp e o vault perguntam a cada volta
+        return _CEL_CACHE["pub"]
     linhas = _pedido("GET", URL.replace("/capturas", "/linhas"), key).get("linhas", {})
     pub = ((linhas.get("celular") or {}).get("dados") or {}).get("pub")
-    try:
-        if not isinstance(pub, str) or len(base64.b64decode(pub, validate=True)) != 32:
-            return None
-    except ValueError:
+    if not _pub_valida(pub):
         return None
     fixada_path = _celular_path()
     try:
         fixada = fixada_path.read_text(encoding="utf-8").strip()
     except OSError:
         fixada_path.parent.mkdir(parents=True, exist_ok=True)
-        fixada_path.write_text(pub, encoding="utf-8")
-        logger.info(f"Organiza: chave do celular fixada ({cofre.impressao(pub)})")
-        return pub
+        tmp = fixada_path.with_suffix(".tmp")
+        tmp.write_text(pub, encoding="utf-8")
+        tmp.replace(fixada_path)
+        logger.info(f"Organiza: chave do celular fixada ({cofre.impressao(pub)}); confira a impressão no app")
+        fixada = pub
     if fixada != pub:
         logger.warning(f"Organiza: a chave do celular publicada ({cofre.impressao(pub)}) não é a fixada "
                        f"({cofre.impressao(fixada)}). Nada vai para o celular até conferir: se o app foi "
                        f"reinstalado do zero, apague {fixada_path} para fixar a nova.")
         return None
+    _CEL_CACHE.update(pub=pub, ate=agora + 300)
     return pub
+
+
+_CEL_CACHE = {"pub": None, "ate": 0.0}
+
+
+def _pub_valida(pub) -> bool:
+    """32 bytes e uma chave X25519 que dá segredo de verdade (ponto de ordem baixa, como tudo
+    zero, faria toda cifra para o celular falhar para sempre depois de fixada)."""
+    try:
+        if not isinstance(pub, str):
+            return False
+        cru = base64.b64decode(pub, validate=True)
+        if len(cru) != 32:
+            return False
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+        X25519PrivateKey.generate().exchange(X25519PublicKey.from_public_bytes(cru))
+        return True
+    except Exception:
+        return False
 
 
 def main() -> None:

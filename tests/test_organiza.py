@@ -304,10 +304,14 @@ def test_chave_do_celular_fixada_na_primeira_vez_e_troca_recusada(tmp_path, monk
     b = cofre.publica_b64(X25519PrivateKey.generate())
     publicada = {"pub": a}
     monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: {"linhas": {"celular": {"dados": dict(publicada)}}})
+    monkeypatch.setattr(organiza, "_CEL_CACHE", {"pub": None, "ate": 0.0})
     assert organiza.chave_celular("k") == a
     assert (tmp_path / "state/organiza/celular.pub").read_text(encoding="utf-8") == a
     publicada["pub"] = b
+    assert organiza.chave_celular("k") == a  # cache de 5 min: a Semana não é consultada de novo
+    organiza._CEL_CACHE["ate"] = 0.0
     assert organiza.chave_celular("k") is None
     assert "não é a fixada" in caplog.text
-    publicada["pub"] = "curta=="
-    assert organiza.chave_celular("k") is None
+    for ruim in ("curta==", base64.b64encode(bytes(32)).decode()):  # curta e ponto de ordem baixa
+        publicada["pub"] = ruim
+        assert organiza.chave_celular("k") is None

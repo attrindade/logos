@@ -66,3 +66,41 @@ def test_sem_chave_do_celular_nao_manda_nada(tmp_path, monkeypatch):
     monkeypatch.setattr(organiza, "chave_celular", lambda k: None)
     monkeypatch.setattr(organiza, "_pedido", lambda *a, **k: (_ for _ in ()).throw(AssertionError("não devia chamar")))
     assert vault_celular.passo("k", _vault(tmp_path)) is None
+
+
+def test_vault_sumido_ou_atalho_para_fora_da_lista_nao_apaga_nem_manda(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    cel = X25519PrivateKey.generate()
+    monkeypatch.setattr(organiza, "chave_celular", lambda k: cofre.publica_b64(cel))
+    chamadas = []
+    monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: chamadas.append(m) or {"itens": [{"id": "a" * 32, "versao": "b" * 32}]})
+    assert vault_celular.passo("k", tmp_path / "nao-existe") is None
+    vazio = tmp_path / "vazio"
+    vazio.mkdir()
+    assert vault_celular.passo("k", vazio) is None
+    assert "DELETE" not in chamadas
+    # nota com acento no nome "Diário" fora de capturas/Diario também não sai
+    v = _vault(tmp_path)
+    (v / "brain" / "Diário solto.md").write_text("x", encoding="utf-8")
+    assert not any("Di" in r and "rio" in r for r in vault_celular.notas(v))
+
+
+def test_chave_nova_do_celular_reenvia_tudo(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    v = _vault(tmp_path)
+    chave = {"pub": cofre.publica_b64(X25519PrivateKey.generate())}
+    monkeypatch.setattr(organiza, "chave_celular", lambda k: chave["pub"])
+    nuvem = {}
+
+    def falso(metodo, url, key, corpo=None):
+        if metodo == "GET":
+            return {"itens": [{"id": i, "versao": ver} for i, ver in nuvem.items()]}
+        if metodo == "PUT":
+            nuvem[corpo["id"]] = corpo["versao"]
+        return {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    assert vault_celular.passo("k", v)[0] == 9
+    assert vault_celular.passo("k", v)[0] == 0
+    chave["pub"] = cofre.publica_b64(X25519PrivateKey.generate())
+    assert vault_celular.passo("k", v)[0] == 9

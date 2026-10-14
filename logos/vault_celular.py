@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import logging
+import unicodedata
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -30,21 +31,29 @@ logger = logging.getLogger(__name__)
 RECURSIVAS = tuple(consulta.ALLOWED_SUBDIRS) + ("reference", "perf", "inbox")
 RASAS = ("work",)          # só os .md direto na pasta
 NUNCA = ("capturas/Diario", "work/archive")
-MAX_NOTA = 1_000_000       # bytes: envelope + base64 cabe no limite da Semana (1,5 MB)
+MAX_NOTA = 1_000_000       # bytes de .md
+MAX_ENV = 1_450_000        # o envelope pronto, abaixo do limite da Semana (1,5 MB)
 URL = organiza.URL.replace("/capturas", "/vault")
 
 
+def _sem_acento(s: str) -> str:
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").lower()
+
+
 def _permitida(raiz: Path, f: Path) -> bool:
-    """Guarda final, por caminho resolvido: dentro do vault, fora do Diário e do arquivo morto."""
+    """Guarda final, por caminho RESOLVIDO (um atalho para fora da lista não passa): dentro de uma
+    pasta da lista, fora do Diário e do arquivo morto, e nada com "diario" no caminho."""
     try:
         rel = f.resolve().relative_to(raiz.resolve()).as_posix()
     except (OSError, ValueError):
         return False
-    if any(rel == n or rel.startswith(n + "/") for n in NUNCA):
+    if any(_sem_acento(rel).startswith(_sem_acento(n) + "/") for n in NUNCA):
         return False
-    if "/diario/" in f"/{rel.lower()}/":
+    if "diario" in _sem_acento(rel):
         return False
-    return f.suffix == ".md" and f.is_file()
+    na_lista = any(rel.startswith(r + "/") for r in RECURSIVAS) or any(
+        rel.startswith(r + "/") and "/" not in rel[len(r) + 1:] for r in RASAS)
+    return na_lista and f.suffix == ".md" and f.is_file()
 
 
 def notas(raiz: Path) -> dict[str, Path]:
@@ -71,8 +80,9 @@ def id_de(chave_ids: bytes, rel: str) -> str:
     return hmac.new(chave_ids, rel.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
-def versao_de(chave_ids: bytes, conteudo: bytes) -> str:
-    return hmac.new(chave_ids, conteudo, hashlib.sha256).hexdigest()[:32]
+def versao_de(chave_ids: bytes, conteudo: bytes, pub: str = "") -> str:
+    """Muda com o conteúdo e com a chave do celular: celular novo recebe tudo de novo."""
+    return hmac.new(chave_ids, pub.encode("ascii") + b"\0" + conteudo, hashlib.sha256).hexdigest()[:32]
 
 
 def passo(key: str, raiz: Path | None = None) -> tuple[int, int] | None:
@@ -81,25 +91,45 @@ def passo(key: str, raiz: Path | None = None) -> tuple[int, int] | None:
     if not pub:
         return None
     raiz = raiz or consulta.vault_root()
+    if not raiz.is_dir():
+        logger.warning(f"Vault no celular: {raiz} não está acessível; nada enviado nem apagado")
+        return None
     chave_ids = _chave_ids(cofre.carregar_ou_criar())
     na_nuvem = {i["id"]: i["versao"] for i in organiza._pedido("GET", URL, key).get("itens", [])}
+    locais = notas(raiz)
+    if not locais and na_nuvem:
+        # Vault vazio de repente (pasta renomeada, disco fora): não apaga a cópia do celular.
+        logger.warning("Vault no celular: nenhuma nota achada; a cópia na Semana fica como está")
+        return None
     vistos, enviadas = set(), 0
-    for rel, f in sorted(notas(raiz).items()):
-        conteudo = f.read_bytes()
-        if len(conteudo) > MAX_NOTA:
-            logger.warning(f"Vault no celular: {rel} passa de {MAX_NOTA // 1000} KB e ficou de fora")
-            continue
-        i, v = id_de(chave_ids, rel), versao_de(chave_ids, conteudo)
+    for rel, f in sorted(locais.items()):
+        i = id_de(chave_ids, rel)
         vistos.add(i)
-        if na_nuvem.get(i) == v:
-            continue
-        dentro = json.dumps({"caminho": rel, "mtime": int(f.stat().st_mtime),
-                             "texto": conteudo.decode("utf-8", errors="replace")}, ensure_ascii=False).encode("utf-8")
-        env = cofre.selar_para_celular(dentro, i, pub)
-        organiza._pedido("PUT", URL, key, {"id": i, "versao": v, "env": json.dumps(env)})
-        enviadas += 1
+        try:
+            conteudo = f.read_bytes()
+            if len(conteudo) > MAX_NOTA:
+                logger.warning(f"Vault no celular: uma nota passa de {MAX_NOTA // 1000} KB e ficou de fora")
+                continue
+            v = versao_de(chave_ids, conteudo, pub)
+            if na_nuvem.get(i) == v:
+                continue
+            texto = conteudo.decode("utf-8")  # nota que não é UTF-8 fica de fora (UnicodeError abaixo)
+            dentro = json.dumps({"caminho": rel, "mtime": int(f.stat().st_mtime), "texto": texto},
+                                ensure_ascii=False).encode("utf-8")
+            env = json.dumps(cofre.selar_para_celular(dentro, i, pub))
+            if len(env) > MAX_ENV:
+                logger.warning("Vault no celular: uma nota passa do limite da Semana depois de fechada e ficou de fora")
+                continue
+            organiza._pedido("PUT", URL, key, {"id": i, "versao": v, "env": env})
+            enviadas += 1
+        except (OSError, UnicodeError, ValueError) as e:  # uma nota ruim não segura as outras
+            logger.warning(f"Vault no celular: uma nota ficou de fora ({type(e).__name__})")
+    sobra = set(na_nuvem) - vistos
+    if len(sobra) > max(20, len(na_nuvem) // 2):
+        logger.warning(f"Vault no celular: {len(sobra)} notas sumiriam de uma vez; nada apagado (confira o vault)")
+        return enviadas, 0
     apagadas = 0
-    for i in set(na_nuvem) - vistos:
+    for i in sobra:
         organiza._pedido("DELETE", f"{URL}?id={i}", key)
         apagadas += 1
     return enviadas, apagadas

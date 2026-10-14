@@ -43,3 +43,15 @@ def test_assistente_fora_do_ar_nao_manda(monkeypatch):
     monkeypatch.setattr(organiza, "chave_celular", lambda k: "x")
     monkeypatch.setattr(whatsapp_celular, "_get", lambda c: (_ for _ in ()).throw(ConnectionRefusedError()))
     assert whatsapp_celular.passo("k") is None
+
+
+def test_conversa_que_falha_nao_manda_fila_pela_metade(monkeypatch):
+    monkeypatch.setattr(organiza, "chave_celular", lambda k: "x")
+
+    def meio(c):
+        if c == "/api/fila":
+            return FILA
+        raise TimeoutError()
+
+    monkeypatch.setattr(whatsapp_celular, "_get", meio)
+    assert whatsapp_celular.passo("k") is None

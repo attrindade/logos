@@ -28,9 +28,13 @@ MAX_GRUPOS = 10
 ID = "whatsapp"  # dados associados do envelope: só serve como a fila do WhatsApp
 
 
+# Chamada local, nunca por proxy do sistema: a fila em claro não sai desta máquina.
+_SEM_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _get(caminho: str) -> dict:
     req = urllib.request.Request(ASSISTENTE + caminho, headers={"User-Agent": organiza.UA})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with _SEM_PROXY.open(req, timeout=5) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -56,16 +60,14 @@ def montar() -> dict:
                 "previa": it.get("previa") or "",
                 "numero": _numero(it.get("jid", "")),
             }
-            try:
-                c = _get("/api/conversa?jid=" + urllib.parse.quote(it["jid"]))
-                s = c.get("sugestao") if c.get("sugestao_fresca") else None
-                if isinstance(s, dict):
-                    item["resumo"] = s.get("resumo") or ""
-                    item["sugestoes"] = [{"rotulo": x.get("rotulo", ""), "texto": x.get("texto", "")}
-                                         for x in (s.get("sugestoes") or [])[:3] if isinstance(x, dict)]
-                    item["falta_saber"] = [str(x) for x in (s.get("falta_saber") or [])[:4]]
-            except Exception as e:  # uma conversa ruim não derruba a fila
-                logger.debug(f"WhatsApp no celular: conversa sem detalhe ({type(e).__name__})")
+            # Erro de rede aqui sobe (OSError): fila pela metade não substitui a boa na Semana.
+            c = _get("/api/conversa?jid=" + urllib.parse.quote(it["jid"]))
+            s = c.get("sugestao") if c.get("sugestao_fresca") else None
+            if isinstance(s, dict):
+                item["resumo"] = s.get("resumo") or ""
+                item["sugestoes"] = [{"rotulo": x.get("rotulo", ""), "texto": x.get("texto", "")}
+                                     for x in (s.get("sugestoes") or [])[:3] if isinstance(x, dict)]
+                item["falta_saber"] = [str(x) for x in (s.get("falta_saber") or [])[:4]]
             itens.append(item)
     return {"itens": itens, "grupos_total": len(fila.get("grupo") or [])}
 
@@ -76,14 +78,15 @@ def _ultimo_path():
 
 def passo(key: str) -> bool | None:
     """Uma volta: True se mandou, False se nada mudou, None se não deu (sem chave ou sem Assistente)."""
+    try:
+        doc = montar()  # primeiro o Assistente: fora do ar, nem pergunta à Semana
+    except (OSError, ValueError):
+        return None  # Assistente fora do ar ou respondeu pela metade
     pub = organiza.chave_celular(key)
     if not pub:
         return None
-    try:
-        doc = montar()
-    except OSError:
-        return None  # Assistente fora do ar
-    marca = hashlib.sha256(json.dumps(doc, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    # A chave do celular entra na marca: celular novo recebe a fila de novo.
+    marca = hashlib.sha256((pub + json.dumps(doc, sort_keys=True, ensure_ascii=False)).encode("utf-8")).hexdigest()
     p = _ultimo_path()
     try:
         if p.read_text(encoding="utf-8").strip() == marca:
