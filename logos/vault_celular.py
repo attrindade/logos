@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import unicodedata
 from pathlib import Path
 
@@ -49,7 +50,10 @@ def _permitida(raiz: Path, f: Path) -> bool:
         return False
     if any(_sem_acento(rel).startswith(_sem_acento(n) + "/") for n in NUNCA):
         return False
-    if "diario" in _sem_acento(rel):
+    partes = _sem_acento(rel).split("/")
+    # Pasta chamada Diário em qualquer nível, ou a nota do dia ("Diário — 2026-10-14.md"); uma
+    # decisão que só fala do Diário no nome ("Decisão - Exposição do Diário ao MCP") pode ir.
+    if "diario" in partes[:-1] or re.match(r"diario\W*\d{4}", partes[-1]):
         return False
     na_lista = any(rel.startswith(r + "/") for r in RECURSIVAS) or any(
         rel.startswith(r + "/") and "/" not in rel[len(r) + 1:] for r in RASAS)

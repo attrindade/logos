@@ -81,8 +81,13 @@ def test_vault_sumido_ou_atalho_para_fora_da_lista_nao_apaga_nem_manda(tmp_path,
     assert "DELETE" not in chamadas
     # nota com acento no nome "Diário" fora de capturas/Diario também não sai
     v = _vault(tmp_path)
-    (v / "brain" / "Diário solto.md").write_text("x", encoding="utf-8")
-    assert not any("Di" in r and "rio" in r for r in vault_celular.notas(v))
+    (v / "brain" / "Diário — 2026-10-14.md").write_text("x", encoding="utf-8")
+    (v / "brain" / "diário" / "solto.md").parent.mkdir()
+    (v / "brain" / "diário" / "solto.md").write_text("x", encoding="utf-8")
+    (v / "work" / "Decisão - Exposição do Diário ao MCP.md").write_text("x", encoding="utf-8")
+    rels = vault_celular.notas(v)
+    assert "brain/Diário — 2026-10-14.md" not in rels and "brain/diário/solto.md" not in rels
+    assert "work/Decisão - Exposição do Diário ao MCP.md" in rels
 
 
 def test_chave_nova_do_celular_reenvia_tudo(tmp_path, monkeypatch):
