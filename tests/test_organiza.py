@@ -67,6 +67,25 @@ def test_entrega_monta_fora_e_move_inteiro_sem_duplicar(tmp_path):
     assert len(list(inbox.iterdir())) == 1
 
 
+def test_foto_pdf_e_link_do_app_viram_as_entradas_do_bot(tmp_path):
+    foto, pdf = b"\xff\xd8\xff foto", b"%PDF-1.4 pdf"
+    partes = [
+        {"id": "t", "ordem": 0, "tipo": "texto", "texto": "ver https://exemplo.org/a?b=1, e (https://x.io).",
+         "criada_em": "2026-10-14T01:25:20"},
+        {"id": "f", "ordem": 1, "tipo": "arquivo", "texto": "IMG_1.jpg", "mime": "image/jpeg",
+         "audio": base64.b64encode(foto).decode(), "criada_em": "2026-10-14T01:25:30"},
+        {"id": "d", "ordem": 2, "tipo": "arquivo", "texto": "contrato.pdf", "mime": "application/pdf",
+         "audio": base64.b64encode(pdf).decode(), "criada_em": "2026-10-14T01:25:40"},
+    ]
+    destino = organiza.entregar(_captura("nota", partes), tmp_path / "Inbox", tmp_path / "montando")
+    m = json.loads((destino / "manifest.json").read_text(encoding="utf-8"))["mensagens"]
+    assert m[0]["links"] == ["https://exemplo.org/a?b=1", "https://x.io"]
+    assert m[1] == {"tipo": "foto", "arquivo": "01.jpg", "mime": "image/jpeg", "quando": "2026-10-14T01:25:30",
+                    "nome_original": "IMG_1.jpg"}
+    assert m[2]["tipo"] == "documento" and m[2]["arquivo"] == "02.pdf" and m[2]["nome_original"] == "contrato.pdf"
+    assert (destino / "01.jpg").read_bytes() == foto and (destino / "02.pdf").read_bytes() == pdf
+
+
 def test_pacote_do_app_vai_para_process_bundle(tmp_path, monkeypatch):
     destino = organiza.entregar(_captura(), tmp_path / "Inbox", tmp_path / "m")
     vistos = []

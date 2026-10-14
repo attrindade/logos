@@ -39,7 +39,15 @@ INTERVALO_S = 60
 LIMITE_S = 30
 TAG = "app"  # triage.ORGANIZA_TAG: o nome do pacote diz de onde ele veio
 _TIPO_PALAVRA = {"ideia": "Ideia", "tarefa": "Tarefa", "reuniao": "Reunião"}
-_EXT = {"audio/mp4": ".m4a", "audio/aac": ".aac", "audio/ogg": ".ogg"}
+_EXT = {"audio/mp4": ".m4a", "audio/aac": ".aac", "audio/ogg": ".ogg",
+        "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}
+# Link no texto de uma nota do app: vai em "links", como o bot faz com as entidades do Telegram, e o
+# pipeline busca a página. Pontuação colada no fim (ponto, vírgula, parêntese) não faz parte.
+_URL = re.compile(r"https?://[^\s<>\"']+")
+
+
+def _links(texto: str) -> list[str]:
+    return list(dict.fromkeys(u.rstrip(".,;:!?)]}") for u in _URL.findall(texto or "")))
 
 
 def chave() -> str:
@@ -132,8 +140,20 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
             continue
         if p.get("tipo") == "texto" and (p.get("texto") or "").strip():
             mensagens.append({"tipo": "texto", "texto": p["texto"].strip(), "quando": p.get("criada_em")})
+            links = _links(p["texto"])
+            if links:
+                mensagens[-1]["links"] = links
         elif p.get("tipo") == "voz" and p["id"] in arquivos:
             mensagens.append({"tipo": "voz", "arquivo": arquivos[p["id"]], "quando": p.get("criada_em")})
+        elif p.get("tipo") == "arquivo" and p["id"] in arquivos:
+            # Foto ou PDF anexado no app: as mesmas entradas do bot (o pipeline lê o texto da imagem
+            # e extrai o do PDF).
+            mime = p.get("mime") or ""
+            e = {"tipo": "foto" if mime.startswith("image/") else "documento",
+                 "arquivo": arquivos[p["id"]], "mime": mime, "quando": p.get("criada_em")}
+            if (p.get("texto") or "").strip():
+                e["nome_original"] = p["texto"].strip()
+            mensagens.append(e)
         else:
             continue
         if p.get("pergunta"):
@@ -164,7 +184,7 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
 def entregar(captura: dict, inbox: Path, oficina: Path, audio=None) -> Path:
     """Monta o pacote fora da Inbox e só então o move para lá, inteiro: o watcher nunca vê um
     pacote pela metade. Se já foi entregue (queda entre mover e avisar a Semana), não duplica.
-    `audio(id_da_parte)` devolve o base64 da voz: a lista de pendentes não traz o áudio (várias
+    `audio(id_da_parte)` devolve o base64 da voz (ou da foto e do PDF): a lista de pendentes não traz o áudio (várias
     vozes juntas estouravam a memória do Worker), então cada uma vem num pedido."""
     nome = nome_pacote(captura)
     destino = inbox / nome
@@ -177,13 +197,13 @@ def entregar(captura: dict, inbox: Path, oficina: Path, audio=None) -> Path:
     arquivos: dict[str, str] = {}
     n = 0
     for p in captura.get("partes", []):
-        if p.get("tipo") != "voz":
+        if p.get("tipo") not in ("voz", "arquivo"):
             continue
         b64 = p.get("audio") or (audio(p["id"]) if audio and p.get("tem_audio") else None)
         if not b64:
             continue
         n += 1
-        arq = f"{n:02d}{_EXT.get(p.get('mime') or '', '.m4a')}"
+        arq = f"{n:02d}{_EXT.get(p.get('mime') or '', '.m4a' if p.get('tipo') == 'voz' else '.bin')}"
         (tmp / arq).write_bytes(base64.b64decode(b64))
         arquivos[p["id"]] = arq
     m = manifest_de(captura, arquivos)
