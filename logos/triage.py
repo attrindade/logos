@@ -35,6 +35,8 @@ _CATEGORIAS = {
 
 # Sufixo no nome dos arquivos gravados pelo bot: "2026-09-14 15-02-11 tg 123.txt" (123 = message_id).
 TELEGRAM_TAG = "tg"
+# Pacotes do app Organiza: "2026-10-14 01-25-11 app f1cd4982" (id curto da anotação).
+ORGANIZA_TAG = "app"
 
 
 @dataclass(frozen=True)
@@ -103,19 +105,24 @@ def triage_from_filename(filename: str, fallback: datetime | None = None) -> dat
 
 
 def is_bundle_name(name: str) -> bool:
-    """Pasta de pacote do bot: 'YYYY-MM-DD HH-MM-SS tg <message_id>'."""
+    """Pasta de pacote do bot ('YYYY-MM-DD HH-MM-SS tg <message_id>') ou do app Organiza
+    ('YYYY-MM-DD HH-MM-SS app <id>', montada por logos.organiza direto na Inbox)."""
     return (
         not is_ignored(name)
         and Path(name).suffix == ""
         and _NAME_RE.match(name) is not None
-        and canal_from_filename(name) == "telegram"
+        and canal_from_filename(name) in ("telegram", "organiza")
     )
 
 
 def canal_from_filename(filename) -> str:
     m = _name_match(filename)
     words = (m.group("tag") or "").lower().split() if m else []
-    return "telegram" if words and words[0] == TELEGRAM_TAG else "syncthing"
+    if words and words[0] == TELEGRAM_TAG:
+        return "telegram"
+    if words and words[0] == ORGANIZA_TAG:
+        return "organiza"
+    return "syncthing"
 
 
 def _normalize_word(word: str) -> str:
