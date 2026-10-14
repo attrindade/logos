@@ -350,6 +350,41 @@ def conferir_chave_publicada(key: str) -> bool:
     return True
 
 
+def _celular_path() -> Path:
+    return config.STATE_DIR / "organiza" / "celular.pub"
+
+
+def chave_celular(key: str) -> str | None:
+    """A pública do celular (linha "celular" da Semana), fixada na primeira vez que aparece.
+
+    Quem tiver a chave da Semana poderia publicar a pública dele e passar a ler o que o PC fecha
+    para o celular (WhatsApp, vault). Por isso: a primeira vista fica em `state/organiza/celular.pub`
+    e, se a publicada mudar, nada é fechado para a nova e o log avisa. Celular trocado ou app
+    reinstalado do zero: confira a impressão no app e apague o `celular.pub` para fixar a nova.
+    """
+    linhas = _pedido("GET", URL.replace("/capturas", "/linhas"), key).get("linhas", {})
+    pub = ((linhas.get("celular") or {}).get("dados") or {}).get("pub")
+    try:
+        if not isinstance(pub, str) or len(base64.b64decode(pub, validate=True)) != 32:
+            return None
+    except ValueError:
+        return None
+    fixada_path = _celular_path()
+    try:
+        fixada = fixada_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        fixada_path.parent.mkdir(parents=True, exist_ok=True)
+        fixada_path.write_text(pub, encoding="utf-8")
+        logger.info(f"Organiza: chave do celular fixada ({cofre.impressao(pub)})")
+        return pub
+    if fixada != pub:
+        logger.warning(f"Organiza: a chave do celular publicada ({cofre.impressao(pub)}) não é a fixada "
+                       f"({cofre.impressao(fixada)}). Nada vai para o celular até conferir: se o app foi "
+                       f"reinstalado do zero, apague {fixada_path} para fixar a nova.")
+        return None
+    return pub
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Traz as anotações do app Organiza para a Inbox do Logos.")
     ap.add_argument("--uma-vez", action="store_true", help="uma volta só, para testar")
@@ -361,6 +396,7 @@ def main() -> None:
         raise SystemExit("Falta a chave da Semana: SEMANA_KEY ou semana_key em state/secrets.yaml.")
     inbox = args.inbox or config.INBOX_DIR
     oficina = config.STATE_DIR / "organiza" / "montando"
+    ultima_ida = 0.0
     while True:
         try:
             novas, notas = passo(key, inbox, oficina, config.LEDGER_PATH)
@@ -372,7 +408,25 @@ def main() -> None:
                 raise
         if args.uma_vez:
             return
+        # O sentido contrário (PC → celular), mais espaçado: o vault muda devagar.
+        if time.time() - ultima_ida >= IDA_S and args.inbox is None:
+            ultima_ida = time.time()
+            ida_ao_celular(key)
         time.sleep(INTERVALO_S)
+
+
+IDA_S = 600
+
+
+def ida_ao_celular(key: str) -> None:
+    """O que o PC manda para o celular, fechado com a chave dele: as notas do vault."""
+    from . import vault_celular  # aqui dentro: vault_celular importa este módulo
+    try:
+        r = vault_celular.passo(key)
+        if r and (r[0] or r[1]):
+            logger.info(f"Vault no celular: {r[0]} enviada(s), {r[1]} apagada(s)")
+    except Exception as e:
+        logger.warning(f"Vault no celular: volta falhou: {e}")
 
 
 if __name__ == "__main__":

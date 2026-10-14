@@ -28,6 +28,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from . import config
 
 INFO = b"organiza-cofre-v1"
+# O sentido contrário (PC → celular: fila do WhatsApp, notas do vault) usa outro rótulo no HKDF:
+# um envelope de um sentido nunca abre no outro. O par do celular é dele (ChaveCelular.java).
+INFO_CEL = b"organiza-cofre-cel-v1"
 MIME = "application/organiza-cofre"
 
 
@@ -76,8 +79,8 @@ def impressao(pub_b64: str) -> str:
     return base64.b64encode(hashlib.sha256(base64.b64decode(pub_b64)).digest()[:8]).decode()
 
 
-def _chave_simetrica(segredo: bytes) -> bytes:
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=INFO).derive(segredo)
+def _chave_simetrica(segredo: bytes, info: bytes = INFO) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(segredo)
 
 
 def abrir(envelope: str | dict, id_parte: str, chave: X25519PrivateKey) -> bytes:
@@ -117,6 +120,29 @@ def selar(conteudo: bytes, id_parte: str, pub_b64: str) -> dict:
         "nonce": base64.b64encode(nonce).decode(),
         "ct": base64.b64encode(ct).decode(),
     }
+
+
+def selar_para_celular(conteudo: bytes, id_parte: str, pub_cel_b64: str) -> dict:
+    """Fecha para o celular (só ele abre, com a privada que não sai de lá). Dados associados =
+    `id_parte`, como no Diário: um envelope não serve no lugar de outro."""
+    cel = X25519PublicKey.from_public_bytes(base64.b64decode(pub_cel_b64))
+    efemera = X25519PrivateKey.generate()
+    nonce = os.urandom(12)
+    ct = AESGCM(_chave_simetrica(efemera.exchange(cel), INFO_CEL)).encrypt(nonce, conteudo, id_parte.encode("utf-8"))
+    return {
+        "v": 1,
+        "chave_cel": impressao(pub_cel_b64),
+        "efemera": publica_b64(efemera),
+        "nonce": base64.b64encode(nonce).decode(),
+        "ct": base64.b64encode(ct).decode(),
+    }
+
+
+def abrir_do_pc(envelope: dict, id_parte: str, chave_cel: X25519PrivateKey) -> bytes:
+    """O que o celular faz (Cofre.abrirDoPc); só para os testes conferirem os dois lados."""
+    segredo = chave_cel.exchange(X25519PublicKey.from_public_bytes(base64.b64decode(envelope["efemera"])))
+    return AESGCM(_chave_simetrica(segredo, INFO_CEL)).decrypt(
+        base64.b64decode(envelope["nonce"]), base64.b64decode(envelope["ct"]), id_parte.encode("utf-8"))
 
 
 def main() -> None:

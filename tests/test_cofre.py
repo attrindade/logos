@@ -45,3 +45,16 @@ def test_envelope_ilegivel_e_nao_abre_nunca_sem_conteudo(tmp_path, ruim):
     chave = cofre.carregar_ou_criar(tmp_path / "cofre.key")
     with pytest.raises(cofre.CofreErro):
         cofre.abrir(ruim, "parte-1", chave)
+
+
+def test_para_o_celular_abre_so_com_a_chave_do_celular_e_nunca_como_diario(tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    cel = X25519PrivateKey.generate()
+    pub_cel = cofre.publica_b64(cel)
+    env = cofre.selar_para_celular(b"fila do whatsapp", "w1", pub_cel)
+    assert cofre.abrir_do_pc(env, "w1", cel) == b"fila do whatsapp"
+    assert env["chave_cel"] == cofre.impressao(pub_cel) and "chave_pc" not in env
+    with pytest.raises(Exception):
+        cofre.abrir_do_pc(env, "w2", cel)  # outro id
+    with pytest.raises(cofre.CofreErro):
+        cofre.abrir(env, "w1", cel)  # rótulo do Diário: um sentido não abre no outro

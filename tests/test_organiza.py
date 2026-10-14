@@ -294,3 +294,20 @@ def test_agrupar_usa_as_perguntas_do_pacote_quando_vem():
     # sem lista própria (ou com lixo), ficam as do bot
     bot = pipeline._agrupar(["boa"], [1], "diario", "###", [3])
     assert bot.startswith("### " + pipeline.PERGUNTAS_POR_ROTA["diario"][0])
+
+
+def test_chave_do_celular_fixada_na_primeira_vez_e_troca_recusada(tmp_path, monkeypatch, caplog):
+    from logos import cofre
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    a = cofre.publica_b64(X25519PrivateKey.generate())
+    b = cofre.publica_b64(X25519PrivateKey.generate())
+    publicada = {"pub": a}
+    monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: {"linhas": {"celular": {"dados": dict(publicada)}}})
+    assert organiza.chave_celular("k") == a
+    assert (tmp_path / "state/organiza/celular.pub").read_text(encoding="utf-8") == a
+    publicada["pub"] = b
+    assert organiza.chave_celular("k") is None
+    assert "não é a fixada" in caplog.text
+    publicada["pub"] = "curta=="
+    assert organiza.chave_celular("k") is None
