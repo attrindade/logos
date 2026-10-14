@@ -454,6 +454,7 @@ def main() -> None:
         # o vault mais espaçado, que muda devagar.
         if args.inbox is None:
             fila_ao_celular(key)
+            pedidos_do_celular(key)
             if time.time() - ultima_ida >= IDA_S:
                 ultima_ida = time.time()
                 ida_ao_celular(key)
@@ -470,6 +471,17 @@ def fila_ao_celular(key: str) -> None:
         whatsapp_celular.passo(key)
     except Exception as e:
         logger.warning(f"WhatsApp no celular: volta falhou: {e}")
+
+
+def pedidos_do_celular(key: str) -> None:
+    """Jobs do vault que o celular pediu para rodar (a allowlist do bot)."""
+    from . import pedidos_celular
+    try:
+        n = pedidos_celular.passo(key)
+        if n:
+            logger.info(f"Pedidos do celular: {n} disparado(s)")
+    except Exception as e:
+        logger.warning(f"Pedidos do celular: volta falhou: {e}")
 
 
 def ida_ao_celular(key: str) -> None:
