@@ -408,14 +408,26 @@ def main() -> None:
                 raise
         if args.uma_vez:
             return
-        # O sentido contrário (PC → celular), mais espaçado: o vault muda devagar.
-        if time.time() - ultima_ida >= IDA_S and args.inbox is None:
-            ultima_ida = time.time()
-            ida_ao_celular(key)
+        # O sentido contrário (PC → celular): a fila do WhatsApp a cada volta (só vai se mudou);
+        # o vault mais espaçado, que muda devagar.
+        if args.inbox is None:
+            fila_ao_celular(key)
+            if time.time() - ultima_ida >= IDA_S:
+                ultima_ida = time.time()
+                ida_ao_celular(key)
         time.sleep(INTERVALO_S)
 
 
 IDA_S = 600
+
+
+def fila_ao_celular(key: str) -> None:
+    """A fila do WhatsApp do Assistente, fechada para o celular (só quando mudou)."""
+    from . import whatsapp_celular
+    try:
+        whatsapp_celular.passo(key)
+    except Exception as e:
+        logger.warning(f"WhatsApp no celular: volta falhou: {e}")
 
 
 def ida_ao_celular(key: str) -> None:
