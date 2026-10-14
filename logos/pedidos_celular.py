@@ -25,7 +25,9 @@ URL = organiza.URL.replace("/capturas", "/pedidos")
 
 def _texto(html_bot: str) -> str:
     """A resposta do bot é HTML do Telegram (<b>, <i>, <code>); o celular mostra texto."""
-    return html.unescape(re.sub(r"<[^>]+>", "", html_bot or "")).strip()[:2000]
+    texto = html.unescape(re.sub(r"<[^>]+>", "", html_bot or ""))
+    # "Aviso aqui quando terminar." é do chat do bot; no celular o estado muda sozinho.
+    return texto.replace("Aviso aqui quando terminar.", "").strip()[:2000]
 
 
 def _estado(key: str, pid: str, estado: str, resposta: str) -> None:
