@@ -152,3 +152,59 @@ def test_nota_apagada_na_semana_sai_de_entregues(tmp_path, monkeypatch):
     organiza._gravar_entregues({"apagada-00000001": "p"})
     assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", ledger) == (0, 1)
     assert organiza._ler_entregues() == {}
+
+
+def test_diario_cifrado_abre_no_pc_vai_com_rota_e_volta_sem_titulo(tmp_path, monkeypatch):
+    from logos import cofre
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    chave = cofre.carregar_ou_criar()
+    pub = cofre.publica_b64(chave)
+    texto = cofre.selar(json.dumps({"tipo": "texto", "texto": "o que pesou hoje"}).encode(), "d1", pub)
+    voz = cofre.selar(json.dumps({"tipo": "voz", "audio": base64.b64encode(VOZ).decode(), "mime": "audio/mp4"}).encode(), "d2", pub)
+    captura = dict(_captura("diario"), id="diario-000000001", partes=[
+        {"id": "d1", "ordem": 0, "tipo": "cifrada", "audio": json.dumps(texto), "criada_em": "2026-10-14T22:00:00"},
+        {"id": "d2", "ordem": 1, "tipo": "cifrada", "tem_audio": 1, "criada_em": "2026-10-14T22:01:00"},
+    ])
+    pedidos = []
+
+    def falso(metodo, url, key, corpo=None):
+        pedidos.append((metodo, url.rsplit("/", 1)[-1], corpo))
+        if url.endswith("/pendentes"):
+            return {"capturas": [captura]} if sum(1 for p in pedidos if p[1] == "pendentes") == 1 else {"capturas": []}
+        if "/partes?id=d2" in url:
+            return {"audio": json.dumps(voz)}
+        return {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    ledger = tmp_path / "ledger.json"
+    assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", ledger) == (1, 0)
+    pacote = next((tmp_path / "Inbox").iterdir())
+    m = json.loads((pacote / "manifest.json").read_text(encoding="utf-8"))
+    assert m["rota"] == "diario"
+    assert m["mensagens"][0] == {"tipo": "texto", "texto": "o que pesou hoje", "quando": "2026-10-14T22:00:00"}
+    assert (pacote / m["mensagens"][1]["arquivo"]).read_bytes() == VOZ
+
+    nota = tmp_path / "Diário — 2026-10-14.md"
+    nota.write_text("---\ntitulo: Diário\n---\n## ⚡ Próxima Ação Imediata\n- [ ] algo pessoal ⏫\n", encoding="utf-8")
+    ledger.write_text(json.dumps({"x": {"filename": pacote.name, "state": "enriched", "note_path": str(nota)}}), encoding="utf-8")
+    assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", ledger) == (0, 1)
+    assert pedidos[-1] == ("PUT", "estado", {"id": "diario-000000001", "estado": "nota"})  # nada do conteúdo
+
+
+def test_diario_com_outra_chave_fica_na_nuvem(tmp_path, monkeypatch):
+    from logos import cofre
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    cofre.carregar_ou_criar()
+    outra = cofre.publica_b64(cofre.X25519PrivateKey.generate())
+    env = cofre.selar(b'{"tipo": "texto", "texto": "x"}', "d1", outra)
+    captura = dict(_captura("diario"), id="diario-000000002", partes=[
+        {"id": "d1", "ordem": 0, "tipo": "cifrada", "audio": json.dumps(env), "criada_em": "2026-10-14T22:00:00"}])
+    pedidos = []
+
+    def falso(metodo, url, key, corpo=None):
+        pedidos.append((metodo, url, corpo))
+        return {"capturas": [captura]} if url.endswith("/pendentes") else {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json") == (0, 0)
+    assert not any(m == "PUT" for m, _, _ in pedidos)  # nem "pc": o envelope continua lá

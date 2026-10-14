@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from . import config
+from . import config, cofre
 from .telegram import MANIFEST, load_secrets, write_manifest
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,26 @@ def nome_pacote(captura: dict) -> str:
     return f"{data} {hora.replace(':', '-')} {TAG} {curto}"
 
 
+def abrir_partes(captura: dict, audio, chave) -> dict:
+    """Diário: cada parte "cifrada" vira texto ou voz de novo, aqui no PC (só ele tem a chave).
+    Devolve a captura com as partes abertas. CofreErro sobe: sem a chave certa, não entrega."""
+    abertas = []
+    for p in captura.get("partes", []):
+        if p.get("tipo") != "cifrada":
+            abertas.append(p)
+            continue
+        env = p.get("audio") or audio(p["id"])
+        dentro = json.loads(cofre.abrir(env, p["id"], chave).decode("utf-8"))
+        q = {k: v for k, v in p.items() if k not in ("audio", "tem_audio", "mime")}
+        q["tipo"] = dentro.get("tipo", "texto")
+        if q["tipo"] == "voz":
+            q["audio"], q["mime"] = dentro["audio"], dentro.get("mime", "audio/mp4")
+        else:
+            q["texto"] = dentro.get("texto", "")
+        abertas.append(q)
+    return dict(captura, partes=abertas)
+
+
 def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
     """Manifest no formato do bot. O tipo escolhido no app vira a primeira palavra do primeiro
     texto, que é como o triage fixa a categoria (o mesmo que o /tarefa do bot faz)."""
@@ -78,7 +98,7 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
             mensagens[0]["texto"] = f"{palavra}: {mensagens[0]['texto']}"
         else:
             mensagens.insert(0, {"tipo": "texto", "texto": palavra, "quando": captura.get("aberta_em")})
-    return {
+    m = {
         "origem": "organiza",
         "captura_id": captura["id"],
         "aberto_em": captura.get("aberta_em"),
@@ -86,6 +106,9 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
         "motivo_fechamento": "fechada no app",
         "mensagens": mensagens,
     }
+    if captura.get("tipo") == "diario":
+        m["rota"] = "diario"  # o pipeline soma no "Diário — AAAA-MM-DD.md" do dia, como o /diario
+    return m
 
 
 def entregar(captura: dict, inbox: Path, oficina: Path, audio=None) -> Path:
@@ -189,13 +212,21 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
     Cada nota tem o seu try: uma com defeito não segura as outras na fila."""
     entregues = _ler_entregues()
     novas = 0
+    chave_cofre = None
 
     def audio(parte_id: str) -> str:
         return _pedido("GET", f"{URL}/partes?id={parte_id}", key).get("audio") or ""
 
     for c in _pedido("GET", URL + "/pendentes", key).get("capturas", []):
         try:
+            if any(p.get("tipo") == "cifrada" for p in c.get("partes", [])):
+                chave_cofre = chave_cofre or cofre.carregar_ou_criar()
+                c = abrir_partes(c, audio, chave_cofre)
             destino = entregar(c, inbox, oficina, audio)
+        except cofre.CofreErro as e:
+            # Fica na nuvem (o envelope some quando vira "pc"): com a chave certa de volta, abre.
+            logger.warning(f"Organiza: Diário {c.get('id')} não abre: {e}")
+            continue
         except ValueError as e:
             # Sem nada para guardar (as partes não chegaram): sai da fila da Semana, senão dez
             # assim ocupariam a janela de pendentes para sempre.
@@ -209,6 +240,8 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
             logger.warning(f"Organiza: {c.get('id')} não foi entregue nesta volta: {e}")
             continue
         entregues[c["id"]] = destino.name
+        if c.get("tipo") == "diario":
+            entregues[c["id"]] = "diario:" + destino.name  # na volta, sem título (ver abaixo)
         _gravar_entregues(entregues)  # antes de avisar: se a Semana não ouvir, a próxima volta não duplica
         try:
             _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "pc"})
@@ -218,12 +251,17 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         logger.info(f"Organiza: {destino.name} entregue à Inbox")
     notas = 0
     for cid, nome in list(entregues.items()):
+        diario = nome.startswith("diario:")
+        nome = nome.removeprefix("diario:")
         nota = nota_do_pacote(nome, ledger_path)
         if nota is None:
             continue
-        titulo, proxima = resumo_da_nota(nota)
+        # Do Diário não volta nada para a nuvem além de "virou nota": nem título, nem ação.
+        corpo = {"id": cid, "estado": "nota"}
+        if not diario:
+            corpo["titulo"], corpo["proxima"] = resumo_da_nota(nota)
         try:
-            _pedido("PUT", URL + "/estado", key, {"id": cid, "estado": "nota", "titulo": titulo, "proxima": proxima})
+            _pedido("PUT", URL + "/estado", key, corpo)
         except Exception as e:
             if not _sumiu(e):
                 logger.warning(f"Organiza: Semana não ouviu o 'nota' de {cid}: {e}")
