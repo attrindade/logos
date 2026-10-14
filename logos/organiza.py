@@ -63,13 +63,20 @@ def nome_pacote(captura: dict) -> str:
     return f"{data} {hora.replace(':', '-')} {TAG} {curto}"
 
 
+def eh_diario(captura: dict) -> bool:
+    """Decidido aqui, pelo conteúdo, não só pelo campo "tipo" da nuvem: quem mexesse no D1 e
+    trocasse o tipo faria o título do Diário voltar à Semana em texto puro."""
+    return captura.get("tipo") == "diario" or any(p.get("tipo") == "cifrada" for p in captura.get("partes", []))
+
+
 def abrir_partes(captura: dict, audio, chave) -> dict:
     """Diário: cada parte "cifrada" vira texto ou voz de novo, aqui no PC (só ele tem a chave).
+    Parte em claro num Diário não entra (não deveria existir: o celular e a Semana barram).
     Devolve a captura com as partes abertas. CofreErro sobe: sem a chave certa, não entrega."""
     abertas = []
     for p in captura.get("partes", []):
         if p.get("tipo") != "cifrada":
-            abertas.append(p)
+            logger.warning(f"Organiza: parte em claro {p.get('id')} no Diário {captura.get('id')} descartada")
             continue
         env = p.get("audio") or audio(p["id"])
         dentro = json.loads(cofre.abrir(env, p["id"], chave).decode("utf-8"))
@@ -213,23 +220,29 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
     entregues = _ler_entregues()
     novas = 0
     chave_cofre = None
+    if caminho_chave_existe():
+        conferir_chave_publicada(key)
 
     def audio(parte_id: str) -> str:
         return _pedido("GET", f"{URL}/partes?id={parte_id}", key).get("audio") or ""
 
     for c in _pedido("GET", URL + "/pendentes", key).get("capturas", []):
+        diario = eh_diario(c)
         try:
-            if any(p.get("tipo") == "cifrada" for p in c.get("partes", [])):
+            if diario:
                 chave_cofre = chave_cofre or cofre.carregar_ou_criar()
-                c = abrir_partes(c, audio, chave_cofre)
+                c = dict(abrir_partes(c, audio, chave_cofre), tipo="diario")
             destino = entregar(c, inbox, oficina, audio)
         except cofre.CofreErro as e:
             # Fica na nuvem (o envelope some quando vira "pc"): com a chave certa de volta, abre.
             logger.warning(f"Organiza: Diário {c.get('id')} não abre: {e}")
             continue
         except ValueError as e:
-            # Sem nada para guardar (as partes não chegaram): sai da fila da Semana, senão dez
-            # assim ocupariam a janela de pendentes para sempre.
+            if c.get("partes") or diario:
+                # Tem partes mas nada saiu delas: fica na nuvem para olhar, sem apagar nada lá.
+                logger.warning(f"Organiza: {c.get('id')} sem conteúdo legível, fica na nuvem: {e}")
+                continue
+            # Nenhuma parte: sai da fila da Semana, senão dez assim ocupariam a janela para sempre.
             logger.warning(f"Organiza: {e}")
             try:
                 _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "nota", "titulo": "Sem conteúdo: nada a guardar"})
@@ -240,7 +253,7 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
             logger.warning(f"Organiza: {c.get('id')} não foi entregue nesta volta: {e}")
             continue
         entregues[c["id"]] = destino.name
-        if c.get("tipo") == "diario":
+        if diario:
             entregues[c["id"]] = "diario:" + destino.name  # na volta, sem título (ver abaixo)
         _gravar_entregues(entregues)  # antes de avisar: se a Semana não ouvir, a próxima volta não duplica
         try:
@@ -270,6 +283,28 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         _gravar_entregues(entregues)
         notas += 1
     return novas, notas
+
+
+def caminho_chave_existe() -> bool:
+    return cofre.caminho_chave().exists()
+
+
+def conferir_chave_publicada(key: str) -> bool:
+    """A chave "cofre" na Semana tem de ser a deste PC. Se alguém trocar, o celular passa a fixar
+    a dele só com o aceite do dono, mas o PC avisa alto no log de qualquer jeito."""
+    try:
+        linhas = _pedido("GET", URL.replace("/capturas", "/linhas"), key).get("linhas", {})
+        publicada = ((linhas.get("cofre") or {}).get("dados") or {}).get("pub")
+    except Exception as e:
+        logger.warning(f"Organiza: não deu para conferir a chave do cofre na Semana: {e}")
+        return True
+    minha = cofre.publica_b64(cofre.carregar_ou_criar())
+    if publicada and publicada != minha:
+        logger.error("Organiza: A CHAVE DO COFRE NA SEMANA NÃO É A DESTE PC "
+                     f"(lá {cofre.impressao(publicada)}, aqui {cofre.impressao(minha)}). "
+                     "Se não foi você, troque a SEMANA_KEY e rode python -m logos.cofre --publicar.")
+        return False
+    return True
 
 
 def main() -> None:

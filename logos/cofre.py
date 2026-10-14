@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import getpass
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -47,7 +50,20 @@ def carregar_ou_criar(path: Path | None = None) -> X25519PrivateKey:
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(cru)
     tmp.replace(path)
+    proteger(path)
     return chave
+
+
+def proteger(path: Path) -> None:
+    """Só o usuário dono lê a chave: tira a herança de permissões da pasta (Windows)."""
+    if sys.platform != "win32":
+        os.chmod(path, 0o600)
+        return
+    try:
+        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{getpass.getuser()}:F"],
+                       check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        pass  # sem icacls: fica a permissão herdada da pasta do usuário
 
 
 def publica_b64(chave: X25519PrivateKey) -> str:
@@ -65,7 +81,13 @@ def _chave_simetrica(segredo: bytes) -> bytes:
 
 
 def abrir(envelope: str | dict, id_parte: str, chave: X25519PrivateKey) -> bytes:
-    env = json.loads(envelope) if isinstance(envelope, str) else envelope
+    try:
+        env = json.loads(envelope) if isinstance(envelope, str) else envelope
+        if not isinstance(env, dict):
+            raise ValueError("envelope não é objeto")
+    except ValueError as e:
+        # Envelope truncado ou vazio é "não abre", nunca "sem conteúdo" (que apagaria os bons).
+        raise CofreErro(f"envelope ilegível: {e}") from e
     if env.get("v") != 1:
         raise CofreErro(f"versão de envelope desconhecida: {env.get('v')}")
     minha = impressao(publica_b64(chave))

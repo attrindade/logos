@@ -38,3 +38,10 @@ def test_recusa_envelope_trocado_ou_adulterado(tmp_path, estrago):
         env["v"] = 2
     with pytest.raises(cofre.CofreErro):
         cofre.abrir(env, parte, usar)
+
+
+@pytest.mark.parametrize("ruim", ["", "{trunc", "[]", "null"])
+def test_envelope_ilegivel_e_nao_abre_nunca_sem_conteudo(tmp_path, ruim):
+    chave = cofre.carregar_ou_criar(tmp_path / "cofre.key")
+    with pytest.raises(cofre.CofreErro):
+        cofre.abrir(ruim, "parte-1", chave)

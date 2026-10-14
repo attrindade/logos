@@ -208,3 +208,45 @@ def test_diario_com_outra_chave_fica_na_nuvem(tmp_path, monkeypatch):
     monkeypatch.setattr(organiza, "_pedido", falso)
     assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json") == (0, 0)
     assert not any(m == "PUT" for m, _, _ in pedidos)  # nem "pc": o envelope continua lá
+
+
+def test_diario_com_tipo_trocado_na_nuvem_continua_diario_e_sem_parte_em_claro(tmp_path, monkeypatch):
+    from logos import cofre
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    pub = cofre.publica_b64(cofre.carregar_ou_criar())
+    env = cofre.selar(json.dumps({"tipo": "texto", "texto": "pessoal"}).encode(), "d1", pub)
+    captura = dict(_captura("nota"), id="diario-000000003", partes=[  # alguém trocou o tipo para "nota"
+        {"id": "d1", "ordem": 0, "tipo": "cifrada", "audio": json.dumps(env), "criada_em": "2026-10-14T22:00:00"},
+        {"id": "x1", "ordem": 1, "tipo": "texto", "texto": "injetado", "criada_em": "2026-10-14T22:01:00"},
+    ])
+    pedidos = []
+
+    def falso(metodo, url, key, corpo=None):
+        pedidos.append((metodo, url.rsplit("/", 1)[-1], corpo))
+        if url.endswith("/pendentes"):
+            return {"capturas": [captura]} if sum(1 for p in pedidos if p[1] == "pendentes") == 1 else {"capturas": []}
+        if url.endswith("/linhas"):
+            return {"linhas": {"cofre": {"dados": {"pub": pub}}}}
+        return {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    ledger = tmp_path / "ledger.json"
+    assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", ledger) == (1, 0)
+    pacote = next((tmp_path / "Inbox").iterdir())
+    m = json.loads((pacote / "manifest.json").read_text(encoding="utf-8"))
+    assert m["rota"] == "diario" and [x.get("texto") for x in m["mensagens"]] == ["pessoal"]
+    nota = tmp_path / "n.md"
+    nota.write_text("---\ntitulo: pessoal\n---\n", encoding="utf-8")
+    ledger.write_text(json.dumps({"x": {"filename": pacote.name, "state": "enriched", "note_path": str(nota)}}), encoding="utf-8")
+    organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", ledger)
+    assert pedidos[-1] == ("PUT", "estado", {"id": "diario-000000003", "estado": "nota"})
+
+
+def test_chave_publicada_diferente_e_avisada(tmp_path, monkeypatch, caplog):
+    from logos import cofre
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    cofre.carregar_ou_criar()
+    outra = cofre.publica_b64(cofre.X25519PrivateKey.generate())
+    monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: {"linhas": {"cofre": {"dados": {"pub": outra}}}})
+    assert organiza.conferir_chave_publicada("k") is False
+    assert "NÃO É A DESTE PC" in caplog.text
