@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from . import config, cofre
+from . import config, cofre, eventos
 from .telegram import MANIFEST, load_secrets, write_manifest
 
 logger = logging.getLogger(__name__)
@@ -325,6 +325,7 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
             logger.warning(f"Organiza: Semana não ouviu o 'pc' de {c['id']}: {e}")
         novas += 1
         logger.info(f"Organiza: {destino.name} entregue à Inbox")
+        eventos.registrar("organiza", "Diário do celular chegou ao PC." if diario else f"Anotação do celular chegou ao PC ({destino.name}).")
     notas = 0
     for cid, nome in list(entregues.items()):
         diario = nome.startswith("diario:")
@@ -458,6 +459,7 @@ def main() -> None:
         if args.inbox is None:
             fila_ao_celular(key)
             pedidos_do_celular(key)
+            vigia_ao_celular(key)
             if time.time() - ultima_ida >= IDA_S:
                 ultima_ida = time.time()
                 ida_ao_celular(key)
@@ -485,6 +487,15 @@ def pedidos_do_celular(key: str) -> None:
             logger.info(f"Pedidos do celular: {n} disparado(s)")
     except Exception as e:
         logger.warning(f"Pedidos do celular: volta falhou: {e}")
+
+
+def vigia_ao_celular(key: str) -> None:
+    """O estado das peças e o registro de eventos, para a aba Logos (`logos/vigia.py`)."""
+    from . import vigia
+    try:
+        vigia.passo(key)
+    except Exception as e:
+        logger.warning(f"Vigia: volta falhou: {e}")
 
 
 def ida_ao_celular(key: str) -> None:

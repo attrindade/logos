@@ -1110,7 +1110,10 @@ def _chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
 
 def notify(text: str) -> bool:
     """Aviso de uma linha para o dono. Nunca levanta: um alerta que derruba o pipeline é
-    pior que a falha que ele anuncia. Devolve False quando não deu para avisar."""
+    pior que a falha que ele anuncia. Devolve False quando não deu para avisar.
+    Antes de tudo, o aviso entra no registro da aba Logos do Organiza (`eventos.py`)."""
+    from . import eventos
+    eventos.registrar("logos", text, eventos.nivel_de(text))
     token, chat_id = get_token(), get_owner_chat_id()
     if not token or chat_id is None:
         logger.warning("Aviso não enviado: bot do Telegram sem token ou sem dono registrado.")
@@ -1124,6 +1127,13 @@ def notify(text: str) -> bool:
 
 
 def send(text: str | None, file: Path | None) -> int:
+    # Os jobs do vault avisam por aqui (`python -m logos.telegram send`): o aviso entra no registro
+    # da aba Logos do Organiza antes do Telegram. Repetição (3 tentativas) não duplica.
+    from . import eventos
+    resumo = (text or "").strip() or (f"Enviado: {file.name}" if file is not None else "")
+    if file is not None and text:
+        resumo = f"{text.strip()}\n{file.name}"
+    eventos.registrar("jobs", resumo, eventos.nivel_de(resumo))
     token, chat_id = get_token(), get_owner_chat_id()
     if not token or chat_id is None:
         missing = "token" if not token else "dono (mande /start ao bot com o watcher rodando)"

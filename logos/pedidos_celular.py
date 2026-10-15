@@ -16,7 +16,7 @@ import logging
 import re
 import threading
 
-from . import jobs, organiza
+from . import eventos, jobs, organiza
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ def _rodar(key: str, pedido: dict) -> None:
         # Chega numa thread do job, minutos depois. Sem ✔️ ou com ⚠️ conta como falha.
         ok = jobs.MARCA_OK in texto and jobs.MARCA_FALHA not in texto
         fim.set()
+        eventos.registrar("jobs", f"{job.titulo} (pedido pelo celular): " + ("terminou." if ok else _texto(texto)),
+                          "info" if ok else "falha")
         try:
             _estado(key, pid, "ok" if ok else "falha", _texto(texto))
         except Exception as e:
@@ -54,6 +56,7 @@ def _rodar(key: str, pedido: dict) -> None:
     # "rodando" antes de disparar: um job que termina num instante não pode ter o "ok" coberto
     # pelo "rodando" que viria depois.
     _estado(key, pid, "rodando", f"{job.titulo}: começando.")
+    eventos.registrar("jobs", f"{job.titulo}: pedido pelo celular, começando.")
     try:
         resposta = jobs.disparar(job, notificar=notificar)
     except jobs.JobError as e:
