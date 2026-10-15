@@ -13,7 +13,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import config
+from . import config, sono
 from .ledger import Entry, Ledger, State
 from .pipeline import process_bundle, process_file, read_manifest, retry_failed
 from .status import PipelineStage, tracker
@@ -252,13 +252,9 @@ def run():
 
     ledger = Ledger(config.LEDGER_PATH)
 
-    logger.info("Varredura inicial da Inbox (cobre arquivos chegados offline e retomadas pendentes)...")
-    retry_failed(ledger)
-    scan_inbox(ledger)
-    expire_archive(ledger)
-
-    tracker.set_idle("Watcher ativo • Monitorando Inbox")
-
+    # Observer e bot sobem ANTES da varredura inicial: ela roda nesta thread e pode levar horas
+    # (em 2026-10-05 uma gravação de 4h na Inbox deixou o bot desconectado desde o boot). Assim o
+    # bot responde na hora e o que ele entrega é processado na thread do watchdog, em paralelo.
     observer = Observer()
     handler = _InboxHandler(ledger)
     observadas = []
@@ -277,12 +273,21 @@ def run():
     stop_bot = threading.Event()
     start_bot_thread(stop_bot)
 
+    logger.info("Varredura inicial da Inbox (cobre arquivos chegados offline e retomadas pendentes)...")
+    retry_failed(ledger)
+    scan_inbox(ledger)
+    expire_archive(ledger)
+
+    tracker.set_idle("Watcher ativo • Monitorando Inbox")
+
     last_daily_check = datetime.now()
     last_rescan = datetime.now()
     try:
         while True:
             time.sleep(10)
             tracker.heartbeat()
+            # Banco novo do relógio: refaz as notas de sono e manda a mensagem da noite, uma vez.
+            sono.verificar()
             if datetime.now() - last_rescan >= timedelta(minutes=RESCAN_INTERVAL_MIN):
                 _subscribe_pending(observer, handler, observadas)
                 scan_inbox(ledger)

@@ -172,9 +172,20 @@ Para um fluxo 100% automático:
 1. No celular, o **Gadgetbridge** (F-Droid) substitui o Huawei Saúde no pareamento. O Watch Fit original (modelo TIA-B09, de 2020) foi testado com o Gadgetbridge 0.95.1.
 2. Em *Configurações → Exportação automática*, aponte a exportação do banco para uma pasta do Syncthing e escolha o intervalo (ex.: a cada 1 h). Celular *Send Only*, PC *Receive Only*.
 3. No `logos_config.yaml`, `gadgetbridge_db` aponta para o arquivo exportado e `vault_dir` para o vault.
-4. Rode `python -m logos.relogio` (refaz ontem e hoje). `--dias 30` preenche o mês para trás; `--linha` imprime só a linha do sono, que o briefing das 8h usa.
+4. Rode `python -m logos.relogio` (refaz ontem e hoje). `--dias 30` preenche o mês para trás; `--linha` imprime só a linha do sono.
 
 A nota é derivada: cada execução a refaz a partir do banco, e chaves de frontmatter que não são do módulo ficam como estão. `atividade/` fica fora do git, do `om` e da allowlist do bot, como o resto dos dados de comportamento.
+
+**Noite e cochilo.** O sono chega em trechos. Cada trecho pertence ao dia em que começa, contado das 18h da véspera às 18h. A noite é o trecho mais longo que começa antes do meio-dia, mais os vizinhos ligados a ele: intervalo de até 30 min, ou acordar entre 22h e 6h e voltar a dormir. O resto é cochilo. `sono_interrupcoes` conta essas voltas; `acordou` segue sendo o número do TruSleep, que este relógio não manda.
+
+### Sono da noite no Telegram e relatórios (`logos/sono.py`)
+
+O watcher confere o arquivo do banco a cada minuto. Quando chega um banco novo, ele refaz as notas `Relógio — dia` e dois relatórios. Quando a noite de hoje já fechou, manda **uma vez** pelo bot a noite comparada com a média das 7 anteriores (horas, hora de dormir, FC de repouso quando houver, último uso do PC). Se a noite foi curta (menos de 6h, ou 1h abaixo da média), lembra do `/planejamento`. A noite conta como fechada quando o banco cobre uma hora depois do fim, se você acordou às 6h ou mais tarde e dormiu 4h ou mais; nos outros casos, quando cobre o meio-dia. Depois das 18h a mensagem do dia não sai mais.
+
+- `atividade/Sono e PC.md`: até que horas o PC ficou em uso (bucket afk do ActivityWatch) contra a hora de dormir e o sono, por noite e por faixa. Só o PC: o celular não entra.
+- `capturas/Diario/Sono e Diário.md`: o sono contra humor, energia e o sono marcados no `/diario` do mesmo dia. Os dados do Diário só são lidos para esse arquivo e só são escritos ali; a mensagem do Telegram e o relatório do PC não recebem nada deles.
+
+Os dois relatórios dizem quando um grupo tem menos de 5 noites e, nesse caso, não tiram conclusão. `python -m logos.sono` refaz tudo e mostra a mensagem de hoje sem enviar; `--enviar` manda.
 
 ---
 
@@ -197,6 +208,7 @@ logos/
 ├── extractors.py         # OCR, visão, PDF, .docx e links dos anexos
 ├── aw.py                 # Evento no ActivityWatch por captura
 ├── relogio.py            # Sono, passos e FC do relógio (banco do Gadgetbridge) → atividade/
+├── sono.py               # Mensagem da noite no Telegram; sono × PC e sono × Diário
 └── prompts/              # Prompts por rota (Diario, Planejamento, Inbox)
 
 setup.py                  # Instalador e configurador TUI interativo

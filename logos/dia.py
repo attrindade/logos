@@ -565,6 +565,15 @@ def entradas_do_diario(dia: date) -> int:
     return len(ler_entradas(Route.DIARIO, dia))
 
 
+def escalas_do_diario(dia: date) -> dict:
+    """O frontmatter do diário do dia (humor_nota, energia, sono, estresse...), ou {} sem diário."""
+    caminho = caminho_nota(Route.DIARIO, dia)
+    if not caminho.exists():
+        return {}
+    fm, _ = _separar_frontmatter(caminho.read_text(encoding="utf-8"))
+    return fm
+
+
 def amanha_do_diario(dia: date) -> str:
     """O "o que muda amanhã" dos diários do dia, para o plano do dia seguinte."""
     itens = [_texto((d.get("enriquecimento") or {}).get("amanha")) for d in ler_entradas(Route.DIARIO, dia)]

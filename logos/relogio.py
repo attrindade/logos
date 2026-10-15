@@ -23,6 +23,13 @@ HuaweiSupportProvider) em 2026-10-13:
 
 As duas tabelas de sono só existem em versões novas do Gadgetbridge e só são preenchidas se o
 relógio mandar TruSleep. Sem elas, o sono sai das amostras de atividade.
+
+Noite e cochilo (regra de 2026-10-13). O sono chega em trechos, e uma noite com uma ida à cozinha
+vira dois. Cada trecho pertence ao dia em que começa, contado das 18h da véspera às 18h. A noite do
+dia é o trecho mais longo que começa antes do meio-dia, mais os vizinhos ligados a ele: dois
+trechos se ligam quando o intervalo entre eles é curto (EMENDA_MIN) ou quando a pessoa acordou de
+madrugada, entre 22h e 6h. O resto é cochilo. `interrupcoes` e `fora_min` contam esses intervalos;
+`acordou` continua sendo o WAKE_COUNT do TruSleep, que só existe com ele.
 """
 from __future__ import annotations
 
@@ -52,14 +59,20 @@ KINDS_DORMINDO = (KIND_LEVE, KIND_PROFUNDO, KIND_REM)
 ESTAGIOS = {1: "leve", 2: "REM", 3: "profundo", 4: "acordado", 5: "cochilo"}
 ESTAGIOS_DORMINDO = (1, 2, 3, 5)
 
-# Noite é o maior sono que termina no dia, desde que passe disto; o resto vira cochilo.
-NOITE_MIN_H = 3
-# Trechos de sono separados por menos que isso são a mesma sessão (só no caminho sem TruSleep).
+# O dia do sono vai das 18h da véspera às 18h: o trecho pertence ao dia em que começa.
+VIRADA_SONO_H = 18
+# A noite começa antes do meio-dia; o que começa depois é cochilo.
+NOITE_ATE_H = 12
+# Acordar nesse horário e voltar a dormir é interrupção da noite, não fim dela.
+MADRUGADA_H = (22, 6)
+# Trecho mais curto que isso não vira noite sozinho.
+NOITE_MIN_MIN = 60
+# Trechos separados por menos que isso são a mesma sessão, a qualquer hora.
 EMENDA_MIN = 30
 
 # Chaves que este módulo refaz a cada execução. O resto do frontmatter é de outro dono.
 _CHAVES = ("date", "description", "tags", "fonte", "atualizado", "sono_h", "sono_inicio", "sono_fim",
-           "sono_nota", "acordou", "cochilos", "passos", "fc_repouso", "fc_min", "fc_max")
+           "sono_nota", "acordou", "sono_interrupcoes", "cochilos", "passos", "fc_repouso", "fc_min", "fc_max")
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 
@@ -75,6 +88,8 @@ class Sono:
     estagios_min: dict[str, int] = field(default_factory=dict)
     acordou: int | None = None
     nota: int | None = None
+    interrupcoes: int = 0
+    fora_min: int = 0
 
     @property
     def horas(self) -> float:
@@ -159,11 +174,12 @@ def _dia_de_atividade(con: sqlite3.Connection, d: date, dia: Dia) -> None:
 
 
 def _sonos_truesleep(con: sqlite3.Connection, ini: datetime, fim: datetime) -> list[Sono]:
+    """Sessões do TruSleep que começam em [ini, fim)."""
     tem_estagios = "HUAWEI_SLEEP_STAGE_SAMPLE" in _tabelas(con)
     sonos = []
     for adormeceu, acordou, nota, vezes in con.execute(
         "SELECT TIMESTAMP, WAKEUP_TIME, SLEEP_SCORE, WAKE_COUNT FROM HUAWEI_SLEEP_STATS_SAMPLE "
-        "WHERE WAKEUP_TIME >= ? AND WAKEUP_TIME < ? ORDER BY TIMESTAMP",
+        "WHERE TIMESTAMP >= ? AND TIMESTAMP < ? ORDER BY TIMESTAMP",
         (_epoch(ini) * 1000, _epoch(fim) * 1000),
     ):
         if not acordou or acordou <= adormeceu:
@@ -192,8 +208,8 @@ def _sonos_truesleep(con: sqlite3.Connection, ini: datetime, fim: datetime) -> l
 
 
 def _sonos_de_atividade(con: sqlite3.Connection, ini: datetime, fim: datetime) -> list[Sono]:
-    """Sono sem TruSleep: trechos de leve/profundo emendados em sessões."""
-    margem = 16 * 3600  # uma noite que acaba no dia começou na véspera
+    """Sono sem TruSleep: trechos de leve/profundo emendados em sessões que começam em [ini, fim)."""
+    margem = 16 * 3600  # lê antes de `ini` para não cortar ao meio uma sessão que começou antes
     rows = con.execute(
         f"SELECT TIMESTAMP, OTHER_TIMESTAMP, RAW_KIND FROM HUAWEI_ACTIVITY_SAMPLE "
         f"WHERE SOURCE IN ({','.join('?' * len(FONTES_SONO))}) AND TIMESTAMP < OTHER_TIMESTAMP "
@@ -216,16 +232,72 @@ def _sonos_de_atividade(con: sqlite3.Connection, ini: datetime, fim: datetime) -
         for a, b, kind in s:
             estagios[nomes[kind]] = estagios.get(nomes[kind], 0) + (b - a) // 60
         dormindo = sum(n for k, n in estagios.items() if k != "acordado")
-        fim_s = datetime.fromtimestamp(max(b for _, b, _ in s)).astimezone()
-        if not dormindo or not (ini <= fim_s < fim):
+        inicio = datetime.fromtimestamp(s[0][0]).astimezone()
+        if not dormindo or not (ini <= inicio < fim):
             continue
         sonos.append(Sono(
-            inicio=datetime.fromtimestamp(s[0][0]).astimezone(),
-            fim=fim_s,
+            inicio=inicio,
+            fim=datetime.fromtimestamp(max(b for _, b, _ in s)).astimezone(),
             dormindo_min=dormindo,
             estagios_min=estagios,
         ))
     return sonos
+
+
+def janela_do_sono(d: date) -> tuple[datetime, datetime]:
+    """Os trechos que começam aqui são do dia `d`: das 18h da véspera às 18h."""
+    ini = _inicio_do_dia(d) - timedelta(hours=24 - VIRADA_SONO_H)
+    return ini, ini + timedelta(days=1)
+
+
+def _ligados(a: Sono, b: Sono, d: date) -> bool:
+    """`b` continua a noite de `a`: intervalo curto, ou acordou de madrugada e voltou a dormir."""
+    if (b.inicio - a.fim).total_seconds() <= EMENDA_MIN * 60:
+        return True
+    madrugada_ini = _inicio_do_dia(d) - timedelta(hours=24 - MADRUGADA_H[0])
+    madrugada_fim = _inicio_do_dia(d) + timedelta(hours=MADRUGADA_H[1])
+    return madrugada_ini <= a.fim < madrugada_fim
+
+
+def _juntar(trechos: list[Sono]) -> Sono:
+    estagios: dict[str, int] = {}
+    for t in trechos:
+        for k, v in t.estagios_min.items():
+            estagios[k] = estagios.get(k, 0) + v
+    vezes = [t.acordou for t in trechos if t.acordou is not None]
+    principal = max(trechos, key=lambda t: t.dormindo_min)
+    return Sono(
+        inicio=trechos[0].inicio,
+        fim=max(t.fim for t in trechos),
+        dormindo_min=sum(t.dormindo_min for t in trechos),
+        estagios_min=estagios,
+        acordou=sum(vezes) if vezes else None,
+        nota=principal.nota,
+        interrupcoes=len(trechos) - 1,
+        fora_min=sum(max(0, int((b.inicio - a.fim).total_seconds() // 60)) for a, b in zip(trechos, trechos[1:])),
+    )
+
+
+def classificar(trechos: list[Sono], d: date) -> tuple[Sono | None, list[Sono]]:
+    """Separa os trechos do dia `d` em noite e cochilos (regra no docstring do módulo)."""
+    trechos = sorted(trechos, key=lambda t: t.inicio)
+    limite = _inicio_do_dia(d) + timedelta(hours=NOITE_ATE_H)
+    candidatos = [i for i, t in enumerate(trechos) if t.inicio < limite and t.dormindo_min >= NOITE_MIN_MIN]
+    if not candidatos:
+        return None, trechos
+    ancora = max(candidatos, key=lambda i: trechos[i].dormindo_min)
+    ini = fim = ancora
+    while ini > 0 and _ligados(trechos[ini - 1], trechos[ini], d):
+        ini -= 1
+    while fim + 1 < len(trechos) and trechos[fim + 1].inicio < limite and _ligados(trechos[fim], trechos[fim + 1], d):
+        fim += 1
+    return _juntar(trechos[ini:fim + 1]), trechos[:ini] + trechos[fim + 1:]
+
+
+def cobertura(con: sqlite3.Connection) -> datetime | None:
+    """Até quando o banco tem amostras: o relógio só manda o que viu até a última sincronização."""
+    ts = con.execute("SELECT MAX(TIMESTAMP) FROM HUAWEI_ACTIVITY_SAMPLE").fetchone()[0]
+    return datetime.fromtimestamp(ts).astimezone() if ts else None
 
 
 def ler_dia(con: sqlite3.Connection, d: date) -> Dia:
@@ -236,15 +308,12 @@ def ler_dia(con: sqlite3.Connection, d: date) -> Dia:
 
     _dia_de_atividade(con, d, dia)
 
-    ini, fim = _inicio_do_dia(d), _inicio_do_dia(d + timedelta(days=1))
+    ini, fim = janela_do_sono(d)
     sonos = _sonos_truesleep(con, ini, fim) if "HUAWEI_SLEEP_STATS_SAMPLE" in tabelas else []
     if not sonos:
         sonos = _sonos_de_atividade(con, ini, fim)
 
-    noites = [s for s in sonos if s.dormindo_min >= NOITE_MIN_H * 60]
-    if noites:
-        dia.noite = max(noites, key=lambda s: s.dormindo_min)
-    dia.cochilos = [s for s in sonos if s is not dia.noite]
+    dia.noite, dia.cochilos = classificar(sonos, d)
     return dia
 
 
@@ -273,6 +342,8 @@ def linha_noite(dia: Dia) -> str:
     if n is None:
         return "Sono: sem dado do relógio para esta noite (sincronizou o Gadgetbridge?)."
     partes = [f"Sono: {_hm(n.dormindo_min)} ({n.inicio:%H:%M} → {n.fim:%H:%M})"]
+    if n.interrupcoes:
+        partes.append(_interrupcoes(n))
     if n.acordou:
         partes.append(f"acordou {n.acordou}x")
     if n.nota:
@@ -282,11 +353,18 @@ def linha_noite(dia: Dia) -> str:
     return ", ".join(partes) + "."
 
 
+def _interrupcoes(s: Sono) -> str:
+    vezes = "1 interrupção" if s.interrupcoes == 1 else f"{s.interrupcoes} interrupções"
+    return f"{vezes} ({_hm(s.fora_min)} acordado)"
+
+
 def _linha_sono(rotulo: str, s: Sono) -> str:
     linha = f"- {rotulo}: {s.inicio:%H:%M} → {s.fim:%H:%M}, **{_hm(s.dormindo_min)}** dormindo"
     detalhe = [f"{k} {_hm(v)}" for k, v in sorted(s.estagios_min.items(), key=lambda kv: -kv[1]) if v]
     if detalhe:
         linha += f" ({' · '.join(detalhe)})"
+    if s.interrupcoes:
+        linha += f", {_interrupcoes(s)}"
     if s.acordou:
         linha += f", acordou {s.acordou}x"
     if s.nota:
@@ -311,6 +389,8 @@ def _frontmatter(dia: Dia, agora: datetime) -> dict:
             fm["sono_nota"] = dia.noite.nota
         if dia.noite.acordou is not None:
             fm["acordou"] = dia.noite.acordou
+        if dia.noite.interrupcoes:
+            fm["sono_interrupcoes"] = dia.noite.interrupcoes
     if dia.cochilos:
         fm["cochilos"] = len(dia.cochilos)
     for chave in ("passos", "fc_repouso", "fc_min", "fc_max"):

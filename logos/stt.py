@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from . import config
 logger = logging.getLogger(__name__)
 
 _model: WhisperModel | None = None
+# A varredura inicial (thread principal) e o observer (thread do watchdog) transcrevem ao mesmo
+# tempo quando uma gravação longa está na Inbox ao subir. Sem a trava, os dois veem _model None
+# e carregam o modelo duas vezes (~1,8 GB cada).
+_model_lock = threading.Lock()
 
 
 def check_ffmpeg() -> bool:
@@ -40,23 +45,24 @@ def get_model() -> WhisperModel:
     """Carrega o modelo faster-whisper. Se já existir localmente, carrega sem consultar o HF Hub.
     Caso contrário, baixa para config.WHISPER_MODELS_DIR."""
     global _model
-    if _model is None:
-        models_dir = Path(config.WHISPER_MODELS_DIR)
-        models_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Se houver snapshots/arquivos já baixados no models_dir ou o usuário configurou offline
-        has_local_model = any(models_dir.iterdir()) if models_dir.exists() else False
-        if has_local_model:
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    with _model_lock:
+        if _model is None:
+            models_dir = Path(config.WHISPER_MODELS_DIR)
+            models_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Carregando modelo Whisper '{config.WHISPER_MODEL_SIZE}' de {models_dir} ...")
-        _model = WhisperModel(
-            config.WHISPER_MODEL_SIZE,
-            device="cpu",
-            compute_type=config.WHISPER_COMPUTE_TYPE,
-            cpu_threads=config.WHISPER_CPU_THREADS,
-            download_root=str(models_dir),
-        )
+            # Se houver snapshots/arquivos já baixados no models_dir ou o usuário configurou offline
+            has_local_model = any(models_dir.iterdir()) if models_dir.exists() else False
+            if has_local_model:
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+            logger.info(f"Carregando modelo Whisper '{config.WHISPER_MODEL_SIZE}' de {models_dir} ...")
+            _model = WhisperModel(
+                config.WHISPER_MODEL_SIZE,
+                device="cpu",
+                compute_type=config.WHISPER_COMPUTE_TYPE,
+                cpu_threads=config.WHISPER_CPU_THREADS,
+                download_root=str(models_dir),
+            )
     return _model
 
 

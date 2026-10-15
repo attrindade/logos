@@ -95,6 +95,72 @@ def test_sem_truesleep_sono_sai_das_amostras_de_atividade(tmp_path):
     assert dia.passos is None
 
 
+def _trecho(con, ini, fim, kind=relogio.KIND_LEVE):
+    con.execute("INSERT INTO HUAWEI_ACTIVITY_SAMPLE VALUES (?,1,1,?,13,?,1,-1,-1,-1,-1,-1,-1)", (ini, fim, kind))
+
+
+def _ler(tmp_path, *trechos):
+    caminho, con = _banco(tmp_path, truesleep=False)
+    for ini, fim in trechos:
+        _trecho(con, ini, fim)
+    con.commit()
+    con.close()
+    con = relogio.abrir(caminho)
+    try:
+        return relogio.ler_dia(con, DIA)
+    finally:
+        con.close()
+
+
+def _hm(s):
+    return f"{s.inicio:%H:%M}-{s.fim:%H:%M}"
+
+
+def test_acordar_de_madrugada_e_voltar_a_dormir_e_a_mesma_noite(tmp_path):
+    # A noite de 13/10: 00:35-03:52, 74 min acordado, 05:06-09:53.
+    dia = _ler(tmp_path, (_ts(0, 35), _ts(3, 52)), (_ts(5, 6), _ts(9, 53)))
+    assert _hm(dia.noite) == "00:35-09:53"
+    assert dia.noite.dormindo_min == 197 + 287
+    assert (dia.noite.interrupcoes, dia.noite.fora_min) == (1, 74)
+    assert dia.cochilos == []
+    assert relogio.linha_noite(dia) == "Sono: 8h04 (00:35 → 09:53), 1 interrupção (1h14 acordado)."
+
+
+def test_noite_que_comeca_na_vespera(tmp_path):
+    # 02/10: dormiu 22:18 na véspera, acordou 03:12, voltou 04:24-08:59.
+    ontem = date(2026, 10, 12)
+    dia = _ler(tmp_path, (_ts(22, 18, ontem), _ts(3, 12)), (_ts(4, 24), _ts(8, 59)))
+    assert _hm(dia.noite) == "22:18-08:59"
+    assert dia.noite.dormindo_min == 294 + 275
+
+
+def test_depois_das_6h_so_intervalo_curto_emenda(tmp_path):
+    # 05/10: 02:07-04:42, 07:14-10:00 e um trecho 31 min depois de acordar, que é cochilo.
+    dia = _ler(tmp_path, (_ts(2, 7), _ts(4, 42)), (_ts(7, 14), _ts(10, 0)), (_ts(10, 31), _ts(11, 5)))
+    assert _hm(dia.noite) == "02:07-10:00"
+    assert [_hm(c) for c in dia.cochilos] == ["10:31-11:05"]
+
+
+def test_cochilos_da_tarde_e_do_comeco_da_noite_ficam_de_fora(tmp_path):
+    ontem = date(2026, 10, 12)
+    dia = _ler(
+        tmp_path,
+        (_ts(19, 0, ontem), _ts(19, 40, ontem)),  # cochilo no começo da noite anterior: não emenda
+        (_ts(1, 0), _ts(8, 0)),
+        (_ts(16, 21), _ts(17, 49)),               # cochilo da tarde
+        (_ts(18, 30), _ts(19, 10)),               # depois das 18h já é do dia seguinte
+    )
+    assert _hm(dia.noite) == "01:00-08:00"
+    assert dia.noite.interrupcoes == 0
+    assert [_hm(c) for c in dia.cochilos] == ["19:00-19:40", "16:21-17:49"]
+
+
+def test_trecho_curto_nao_vira_noite(tmp_path):
+    dia = _ler(tmp_path, (_ts(3, 0), _ts(3, 40)))
+    assert dia.noite is None
+    assert [_hm(c) for c in dia.cochilos] == ["03:00-03:40"]
+
+
 def test_nota_refaz_o_que_e_seu_e_guarda_o_resto(tmp_path):
     caminho, con = _banco(tmp_path)
     _passo(con, _ts(9), 800, 90, 60)
