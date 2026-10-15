@@ -455,6 +455,34 @@ def process_bundle(path: Path, ledger: Ledger) -> None:
         tracker.set_failed(path.name, PipelineStage.WRITING, str(e))
 
 
+def _link(nome: str) -> str:
+    nome = nome.strip()
+    return nome if nome.startswith("[[") else f"[[{nome}]]"
+
+
+def _nome_do_link(x: str) -> str:
+    return str(x).strip().removeprefix("[[").removesuffix("]]").split("|")[0].strip().lower()
+
+
+def aplicar_marcas(enrichment: dict, marcas) -> None:
+    """O que ele escolheu no app Organiza (projetos, pessoas, times, a nota respondida) vale mais que
+    o palpite da LLM: entra primeiro, como wikilink, e o que a LLM achou de diferente fica depois."""
+    if not isinstance(marcas, dict):
+        return
+    for campo in ("projetos", "pessoas", "times"):
+        escolhidos = [_link(x) for x in marcas.get(campo) or [] if isinstance(x, str) and x.strip()]
+        if not escolhidos:
+            continue
+        ja = {_nome_do_link(x) for x in escolhidos}
+        resto = [x for x in (enrichment.get(campo) or []) if isinstance(x, str) and _nome_do_link(x) not in ja]
+        enrichment[campo] = escolhidos + resto
+    r = marcas.get("responde")
+    if isinstance(r, dict) and r.get("titulo"):
+        enrichment["responde_a"] = _link(r["titulo"])
+        if r.get("trecho"):
+            enrichment["responde_trecho"] = str(r["trecho"])[:500]
+
+
 def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[int], ledger: Ledger) -> None:
     start_time = time.time()
     started_at = datetime.now().astimezone()
@@ -608,6 +636,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 degradado = _degradation_reason(e)
                 enrichment = short_enrichment(base) if base.strip() else {"titulo": path.name, "tags": [], "resumo": ""}
                 _notify_degraded(path.name, degradado)
+        aplicar_marcas(enrichment, manifest.get("marcas"))
         if do_dia:
             dia = _dia_da_entrada(t, manifest, fala=triage_text)
             registro, dados = _registrar_no_dia(

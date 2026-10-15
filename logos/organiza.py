@@ -128,6 +128,32 @@ def abrir_partes(captura: dict, audio, chave) -> dict:
     return dict(captura, partes=abertas)
 
 
+def _lista_nomes(x, n: int = 12) -> list[str]:
+    if not isinstance(x, list):
+        return []
+    return [str(v).strip()[:120] for v in x if isinstance(v, str) and str(v).strip()][:n]
+
+
+def abrir_marcas(captura: dict, chave) -> dict:
+    """Projetos, pessoas e times que ele escolheu no app, e a nota que a anotação responde (pedidos
+    dele em 14/10). Vêm num envelope fechado para o PC, com o id da nota como dado associado.
+    Envelope que não abre não segura a nota: ela entra sem as marcas, e o log avisa."""
+    env = captura.get("marcas")
+    if not env:
+        return {}
+    try:
+        d = json.loads(cofre.abrir(env, captura["id"], chave).decode("utf-8"))
+    except (cofre.CofreErro, ValueError) as e:
+        logger.warning(f"Organiza: marcas de {captura.get('id')} não abrem: {e}")
+        return {}
+    m = {k: _lista_nomes(d.get(k)) for k in ("projetos", "pessoas", "times")}
+    r = d.get("responde")
+    if isinstance(r, dict) and isinstance(r.get("titulo"), str) and r["titulo"].strip():
+        m["responde"] = {"titulo": r["titulo"].strip()[:200], "caminho": str(r.get("caminho") or "")[:300],
+                         "trecho": str(r.get("trecho") or "").strip()[:500]}
+    return {k: v for k, v in m.items() if v}
+
+
 def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
     """Manifest no formato do bot. O tipo escolhido no app vira a primeira palavra do primeiro
     texto, que é como o triage fixa a categoria (o mesmo que o /tarefa do bot faz)."""
@@ -172,6 +198,8 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
         "motivo_fechamento": "fechada no app",
         "mensagens": mensagens,
     }
+    if captura.get("marcas_abertas") and captura.get("tipo") != "diario":
+        m["marcas"] = captura["marcas_abertas"]
     if captura.get("tipo") == "diario":
         m["rota"] = "diario"  # o pipeline soma no "Diário — AAAA-MM-DD.md" do dia, como o /diario
         if formulario:
@@ -295,6 +323,9 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
             if diario:
                 chave_cofre = chave_cofre or cofre.carregar_ou_criar()
                 c = dict(abrir_partes(c, audio, chave_cofre), tipo="diario")
+            elif c.get("marcas"):
+                chave_cofre = chave_cofre or cofre.carregar_ou_criar()
+                c = dict(c, marcas_abertas=abrir_marcas(c, chave_cofre))
             destino = entregar(c, inbox, oficina, audio)
         except cofre.CofreErro as e:
             # Fica na nuvem (o envelope some quando vira "pc"): com a chave certa de volta, abre.
@@ -441,8 +472,9 @@ def main() -> None:
     oficina = config.STATE_DIR / "organiza" / "montando"
     ultima_ida = 0.0
     if args.inbox is None and not args.uma_vez:
-        from . import dia_celular
+        from . import acoes_celular, dia_celular
         dia_celular.iniciar(key)  # as falas do Planeja têm laço próprio, de 15 s
+        acoes_celular.iniciar(key)  # tarefa marcada, análise de conversa, contatos: idem
     while True:
         try:
             novas, notas = passo(key, inbox, oficina, config.LEDGER_PATH)
@@ -460,7 +492,8 @@ def main() -> None:
             fila_ao_celular(key)
             pedidos_do_celular(key)
             vigia_ao_celular(key)
-            if time.time() - ultima_ida >= IDA_S:
+            from . import acoes_celular
+            if time.time() - ultima_ida >= IDA_S or acoes_celular.ida_pedida():
                 ultima_ida = time.time()
                 ida_ao_celular(key)
         time.sleep(INTERVALO_S)

@@ -198,6 +198,13 @@ def write_note(
     if projetos:
         frontmatter["projetos"] = projetos
 
+    # Escolhidos no app Organiza: times, e a nota que esta anotação responde.
+    times = _as_list(enrichment.get("times"))
+    if times:
+        frontmatter["times"] = times
+    if enrichment.get("responde_a"):
+        frontmatter["responde_a"] = enrichment["responde_a"]
+
     if anexos:
         frontmatter["anexos"] = _attachment_paths(anexos)
     if local:
@@ -222,6 +229,11 @@ def write_note(
             " resolver a causa, ou promover esta nota à mão.",
             "",
         ]
+
+    # Resposta a uma nota do vault, mandada pelo app: diz a qual nota e a que trecho, no topo.
+    if enrichment.get("responde_a"):
+        trecho = str(enrichment.get("responde_trecho") or "").replace("\n", " ").strip()
+        body_parts += [f"> Resposta a {enrichment['responde_a']}" + (f": “{trecho}”" if trecho else ""), ""]
 
     # ---------------------------------------------------------
     # 2. Seções Estruturadas no Corpo da Nota

@@ -24,6 +24,8 @@ HISTORICO = {"respondidas": [{"jid": "5551888880000@s.whatsapp.net", "nome": "Lo
 
 
 def _falso_get(caminho):
+    if caminho.startswith("/api/buscar"):
+        return []  # a lista de pessoas para "manter contato" (test_acoes_celular cobre)
     if caminho == "/api/fila":
         return FILA
     if caminho == "/api/historico":

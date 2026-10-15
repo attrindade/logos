@@ -88,6 +88,7 @@ def montar() -> dict:
         for it in lista[:MAX_GRUPOS] if secao == "grupo" else lista:
             item = {
                 "secao": secao,
+                "jid": it.get("jid") or "",
                 "nome": it.get("nome") or "",
                 "novas": it.get("novas") or 0,
                 "desde": it.get("desde") or it.get("ultima_ts") or 0,
@@ -117,6 +118,7 @@ def montar() -> dict:
             n += 1
             itens.append({
                 "secao": secao,
+                "jid": jid,
                 "nome": h.get("nome") or "",
                 "novas": 0,
                 "desde": h.get(campo_ts) or 0,
@@ -124,7 +126,60 @@ def montar() -> dict:
                 "numero": _numero(jid),
                 "mensagens": _mensagens(_conversa(jid)),
             })
-    return {"itens": itens, "grupos_total": len(fila.get("grupo") or [])}
+    doc = {"itens": itens, "grupos_total": len(fila.get("grupo") or [])}
+    doc["pessoas"] = pessoas()
+    doc["contatos"] = situacao_contatos(doc["pessoas"])
+    return doc
+
+
+# ---- manter contato (pedido dele em 14/10: "quem eu estou falando, quem eu não estou falando") ----
+
+PESSOAS_S = 600
+MAX_PESSOAS = 400
+_pessoas_cache: tuple[float, list[dict]] = (0.0, [])
+
+
+def pessoas() -> list[dict]:
+    """Conversas individuais e contatos da agenda que o Assistente acha, para o app escolher quem
+    acompanhar: a busca vazia (as recentes) e uma por letra (até 40 cada). Refeita a cada 10 min."""
+    global _pessoas_cache
+    if time.time() - _pessoas_cache[0] < PESSOAS_S and _pessoas_cache[1]:
+        return _pessoas_cache[1]
+    vistos: dict[str, dict] = {}
+    for termo in [""] + list("abcdefghijklmnopqrstuvwxyz"):
+        for x in _get("/api/buscar?q=" + urllib.parse.quote(termo)) or []:
+            jid = x.get("jid") or ""
+            if not jid or x.get("grupo") or jid.endswith("@g.us") or jid in vistos:
+                continue
+            vistos[jid] = {"jid": jid, "nome": x.get("nome") or "", "ultima": x.get("ultima") or 0}
+    lista = sorted(vistos.values(), key=lambda p: (-(p["ultima"] or 0), p["nome"].lower()))[:MAX_PESSOAS]
+    _pessoas_cache = (time.time(), lista)
+    return lista
+
+
+def situacao_contatos(conhecidas: list[dict]) -> list[dict]:
+    """Para cada pessoa da lista "manter contato": a última mensagem dele e a última da pessoa. O
+    app ordena pelo atraso (dias desde a última dele menos a frequência escolhida)."""
+    from . import acoes_celular
+    ultima_conv = {p["jid"]: p.get("ultima") or 0 for p in conhecidas}
+    saida = []
+    for c in acoes_celular.contatos():
+        jid = c["jid"]
+        minha = dela = 0
+        try:
+            for m in _conversa(jid).get("mensagens") or []:
+                ts = m.get("ts") or 0
+                if m.get("de_mim"):
+                    minha = max(minha, ts)
+                else:
+                    dela = max(dela, ts)
+        except (OSError, ValueError):
+            pass
+        if not minha and not dela:
+            dela = ultima_conv.get(jid, 0)
+        saida.append({"jid": jid, "nome": c.get("nome") or "", "dias": c["dias"],
+                      "minha": minha, "dela": dela, "numero": _numero(jid)})
+    return saida
 
 
 def _ultimo_path():
