@@ -118,3 +118,22 @@ def limpar(hoje: date | None = None) -> int:
         except (ValueError, OSError):
             continue
     return n
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m logos.eventos registrar --origem assistente --texto "..."`: o que antes ia pelo
+    `python -m logos.telegram send` (o Assistente e o aw-tools avisavam por ali até 14/10)."""
+    import argparse
+    p = argparse.ArgumentParser(prog="python -m logos.eventos")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("registrar", help="acrescenta uma linha ao registro da aba Logos")
+    r.add_argument("--origem", required=True)
+    r.add_argument("--texto", required=True)
+    r.add_argument("--nivel", choices=NIVEIS, default=None)
+    args = p.parse_args(argv)
+    registrar(args.origem, args.texto, args.nivel or nivel_de(args.texto))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

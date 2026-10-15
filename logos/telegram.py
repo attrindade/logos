@@ -1072,10 +1072,21 @@ def publicar_menu(token: str) -> bool:
         return False
 
 
+# O bot foi desligado em 14/10/2026 (pedido dele, etapa F do planeja/PLANO.md): o app Organiza
+# cobre o que ele fazia (anotar texto, voz, foto, PDF e link; ver e buscar no vault; rodar jobs) e a
+# aba Logos é o painel. `notify` e `send` continuam com o mesmo nome para quem os chama (pipeline,
+# jobs, sono), mas só gravam no registro da aba; nada sai para o Telegram. Religar: BOT_LIGADO = True.
+BOT_LIGADO = False
+
+
 def start_bot_thread(stop: threading.Event) -> threading.Thread | None:
-    """Sobe o bot numa thread daemon do watcher. Sem token, registra `off` e segue sem bot."""
+    """Sobe o bot numa thread daemon do watcher. Desligado (BOT_LIGADO) ou sem token: não sobe."""
     from .status import tracker
 
+    if not BOT_LIGADO:
+        logger.info("Telegram: bot desligado desde 14/10/2026; o painel é a aba Logos do Organiza.")
+        tracker.set_bot("off", last_error=None)
+        return None
     token = get_token()
     if not token:
         logger.info(f"Telegram: sem token ({secrets_path()} ou LOGOS_TELEGRAM_TOKEN), bot desligado.")
@@ -1114,6 +1125,8 @@ def notify(text: str) -> bool:
     Antes de tudo, o aviso entra no registro da aba Logos do Organiza (`eventos.py`)."""
     from . import eventos
     eventos.registrar("logos", text, eventos.nivel_de(text))
+    if not BOT_LIGADO:
+        return True  # o registro é o canal agora
     token, chat_id = get_token(), get_owner_chat_id()
     if not token or chat_id is None:
         logger.warning("Aviso não enviado: bot do Telegram sem token ou sem dono registrado.")
@@ -1134,6 +1147,8 @@ def send(text: str | None, file: Path | None) -> int:
     if file is not None and text:
         resumo = f"{text.strip()}\n{file.name}"
     eventos.registrar("jobs", resumo, eventos.nivel_de(resumo))
+    if not BOT_LIGADO:
+        return EXIT_OK  # o registro é o canal agora
     token, chat_id = get_token(), get_owner_chat_id()
     if not token or chat_id is None:
         missing = "token" if not token else "dono (mande /start ao bot com o watcher rodando)"

@@ -22,6 +22,12 @@ DATE = int(datetime(2026, 9, 14, 15, 2, 11).timestamp())
 BUNDLE = "2026-09-14 15-02-11 tg 7"
 
 
+@pytest.fixture(autouse=True)
+def _bot_ligado(monkeypatch):
+    """Estes testes cobrem o bot como era: desligado em 14/10, ele só volta com BOT_LIGADO."""
+    monkeypatch.setattr(telegram, "BOT_LIGADO", True)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
@@ -783,7 +789,8 @@ def test_cli_nao_importa_status_nem_toca_no_status_json(tmp_path):
     )
     env = {**__import__("os").environ, "LOGOS_DATA_ROOT": str(tmp_path), "LOGOS_TELEGRAM_TOKEN": ""}
     out = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env, capture_output=True, text=True, timeout=60)
-    assert out.stdout.split() == ["2", "False"], out.stderr
+    # Bot desligado (14/10): `send` só grava no registro e sai com 0.
+    assert out.stdout.split() == ["0", "False"], out.stderr
     assert not (tmp_path / "state" / "status.json").exists()
 
 
@@ -1258,3 +1265,26 @@ def test_telas_do_formulario_nao_tem_emoji(owner, api):
             textos += list(_dados(chamada))
         for texto in textos:
             assert not any(ord(c) > 0x2500 for c in texto), texto
+
+
+def test_bot_desligado_nao_sobe_nem_manda_nada(tmp_path, monkeypatch):
+    monkeypatch.setattr(telegram, "BOT_LIGADO", False)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    with patch("logos.telegram.get_token", return_value="t"), \
+         patch("logos.telegram.get_owner_chat_id", return_value=1), \
+         patch("logos.telegram.call") as api:
+        assert telegram.start_bot_thread(threading.Event()) is None
+        assert telegram.notify("Logos: diário registrado.") is True
+        assert telegram.send("Job promover ok", None) == 0
+    api.assert_not_called()
+    from logos import eventos
+    textos = [e["texto"] for e in eventos.ultimos()]
+    assert "Logos: diário registrado." in textos and "Job promover ok" in textos
+
+
+def test_eventos_pela_linha_de_comando(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    from logos import eventos
+    assert eventos.main(["registrar", "--origem", "assistente", "--texto", "Hora de responder: Ana"]) == 0
+    e = eventos.ultimos()[0]
+    assert e["origem"] == "assistente" and e["texto"] == "Hora de responder: Ana"

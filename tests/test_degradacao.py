@@ -127,7 +127,8 @@ def test_nota_degradada_nao_se_chama_pelo_timestamp(inbox, tmp_path):
 
 def test_aviso_do_telegram_nunca_derruba_o_pipeline():
     from logos import telegram
-    with patch("logos.telegram.get_token", return_value="t"), \
+    with patch("logos.telegram.BOT_LIGADO", True), \
+         patch("logos.telegram.get_token", return_value="t"), \
          patch("logos.telegram.get_owner_chat_id", return_value=1), \
          patch("logos.telegram.call", side_effect=RuntimeError("bot fora do ar")):
         assert telegram.notify("teste") is False

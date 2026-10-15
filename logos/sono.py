@@ -432,7 +432,7 @@ def verificar(agora: datetime | None = None, avisar: Callable[[str], bool] | Non
     if estado.get("mtime") == mtime:
         return
     if avisar is None:
-        from .telegram import notify as avisar
+        avisar = _avisar
     try:
         processar(db, vault, agora or datetime.now().astimezone(), estado, avisar, uso_pc)
     except Exception:
@@ -445,12 +445,20 @@ def verificar(agora: datetime | None = None, avisar: Callable[[str], bool] | Non
         logger.warning(f"Sono: estado não gravado ({e}); o próximo banco refaz tudo")
 
 
+def _avisar(texto: str) -> bool:
+    """A mensagem da noite vai para o registro da aba Logos do Organiza (o Telegram foi desligado
+    em 14/10/2026)."""
+    from . import eventos
+    eventos.registrar("sono", texto)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m logos.sono",
         description="Refaz os relatórios de sono e mostra a mensagem da noite de hoje (sem enviar).",
     )
-    p.add_argument("--enviar", action="store_true", help="manda a mensagem de hoje pelo Telegram, mesmo se já foi")
+    p.add_argument("--enviar", action="store_true", help="grava a mensagem de hoje no registro da aba Logos, mesmo se já foi")
     p.add_argument("--db", type=Path, default=config.GADGETBRIDGE_DB)
     p.add_argument("--vault", type=Path, default=config.VAULT_DIR)
     args = p.parse_args(argv)
@@ -461,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
 
     estado = _ler_estado()
     if args.enviar:
-        from .telegram import notify as avisar
+        avisar = _avisar
     else:
         def avisar(_texto: str) -> bool:
             return False

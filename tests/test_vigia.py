@@ -64,7 +64,8 @@ def test_nivel_pelos_moldes_dos_avisos():
 def test_aviso_do_telegram_entra_no_registro_mesmo_sem_bot(tmp_path, monkeypatch):
     _estado(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram, "get_token", lambda: None)
-    assert telegram.notify("Logos: diário registrado.") is False
+    # Bot desligado (14/10): o registro é o canal, então o aviso conta como dado.
+    assert telegram.notify("Logos: diário registrado.") is True
     assert eventos.ultimos()[0]["texto"] == "Logos: diário registrado."
 
 
