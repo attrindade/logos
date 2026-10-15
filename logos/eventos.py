@@ -20,7 +20,7 @@ from . import config
 logger = logging.getLogger(__name__)
 
 NIVEIS = ("info", "atencao", "falha")
-MAX_TEXTO = 600
+MAX_TEXTO = 4000  # o resumo diário e os avisos dos jobs vinham inteiros pelo Telegram (até 4096)
 GUARDA_DIAS = 30
 
 

@@ -220,9 +220,20 @@ def contatos() -> list[dict]:
 
 # ---- o laço ----
 
+class Ocupado(Exception):
+    """Um job do vault está rodando: a ação fica "nova" e é tentada na próxima volta."""
+
+
 def _executar(key: str, a: dict, chave, raiz: Path) -> tuple[str, str]:
     dados = json.loads(cofre.abrir(a.get("env") or "", a["id"], chave).decode("utf-8"))
     tipo = a.get("tipo")
+    # O tipo de fora vem em claro da nuvem: só vale se for o mesmo que o celular fechou dentro.
+    if dados.get("tipo") != tipo:
+        return "falha", "O tipo da ação não confere com o que o celular mandou."
+    if tipo == "concluir":
+        from . import jobs
+        if jobs.lock_dono() is not None:
+            raise Ocupado()  # o job pode estar regravando a mesma nota
     if tipo == "concluir":
         ok, frase = concluir(raiz, str(dados.get("caminho") or ""), str(dados.get("texto") or ""))
         titulo = Path(str(dados.get("caminho") or "")).stem
@@ -260,33 +271,48 @@ def ida_pedida() -> bool:
     return False
 
 
+def _feitas_path() -> Path:
+    return config.STATE_DIR / "organiza" / "acoes_feitas.json"
+
+
 def passo(key: str, raiz: Path | None = None) -> int:
     novas = _pedido("GET", URL + "?novas=1", key).get("acoes") or []
     if not novas:
         return 0
+    # Marcar tarefa e a lista de contatos primeiro: uma análise pode levar minutos no Ollama.
+    novas.sort(key=lambda a: (a.get("tipo") == "analisar", a.get("criada") or ""))
+    # O que já foi feito e só o "ok" não chegou à Semana: reenvia o estado, não refaz.
+    feitas: dict = _ler_json(_feitas_path(), {})
     from . import consulta
     raiz = raiz or consulta.vault_root()
     chave = cofre.carregar_ou_criar()
-    feitas = 0
+    n = 0
     # Lista de contatos: só a última conta; as anteriores saem como ok sem rodar.
     ultima_lista = max((a for a in novas if a.get("tipo") == "contatos"), key=lambda a: a.get("criada") or "", default=None)
     for a in novas:
         try:
-            if a.get("tipo") == "contatos" and a is not ultima_lista:
+            if a["id"] in feitas:
+                estado, frase = feitas[a["id"]]
+            elif a.get("tipo") == "contatos" and a is not ultima_lista:
                 estado, frase = "ok", "Substituída por uma lista mais nova."
             else:
                 estado, frase = _executar(key, a, chave, raiz)
+        except Ocupado:
+            logger.info(f"Ação do celular {a.get('id')} espera o job do vault terminar")
+            continue
         except cofre.CofreErro as e:
             estado, frase = "falha", f"Não abriu no PC ({e})."
         except Exception as e:  # Ollama ou Assistente fora: conta e segue com as outras
             logger.warning(f"Ação do celular {a.get('id')} ({a.get('tipo')}) falhou: {e}")
             estado, frase = "falha", f"Não deu agora: {type(e).__name__}."
+        feitas[a["id"]] = [estado, frase]
+        _gravar_json(_feitas_path(), dict(list(feitas.items())[-200:]))
         try:
             _pedido("PUT", URL, key, {"id": a["id"], "estado": estado, "resposta": frase[:500]})
         except Exception as e:
             logger.warning(f"Semana não ouviu o estado da ação {a.get('id')}: {e}")
-        feitas += 1
-    return feitas
+        n += 1
+    return n
 
 
 def _laco(key: str) -> None:

@@ -1,4 +1,5 @@
 """Drenador do app Organiza: nome do pacote, manifest, entrega na Inbox e estado devolvido."""
+import pytest
 import base64
 import json
 from datetime import datetime
@@ -8,6 +9,13 @@ from logos.triage import canal_from_filename, is_bundle_name, triage
 
 VOZ = b"\x00\x00\x00\x18ftypM4A voz de teste"
 
+
+
+
+@pytest.fixture(autouse=True)
+def _sem_falhas_antigas():
+    organiza._FALHARAM.clear()
+    organiza._TENTATIVAS.clear()
 
 def _captura(tipo="ideia", partes=None):
     return {
@@ -109,7 +117,9 @@ def test_passo_entrega_e_depois_avisa_que_virou_nota(tmp_path, monkeypatch):
     inbox = tmp_path / "Inbox"
 
     assert organiza.passo("k", inbox, tmp_path / "m", ledger) == (1, 0)
-    assert pedidos[1] == ("PUT", "estado", {"id": _captura()["id"], "estado": "pc"})
+    # "pegando" antes de baixar (o celular não reabre mais), depois "pc".
+    assert pedidos[1] == ("PUT", "estado", {"id": _captura()["id"], "estado": "pegando"})
+    assert pedidos[2] == ("PUT", "estado", {"id": _captura()["id"], "estado": "pc"})
 
     # O watcher processou o pacote: o ledger aponta a nota.
     nota = tmp_path / "nota.md"
@@ -226,7 +236,7 @@ def test_diario_com_outra_chave_fica_na_nuvem(tmp_path, monkeypatch):
 
     monkeypatch.setattr(organiza, "_pedido", falso)
     assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json") == (0, 0)
-    assert not any(m == "PUT" for m, _, _ in pedidos)  # nem "pc": o envelope continua lá
+    assert not any(m == "PUT" and c.get("estado") == "pc" for m, _, c in pedidos)  # nem "pc": o envelope continua lá
 
 
 def test_diario_com_tipo_trocado_na_nuvem_continua_diario_e_sem_parte_em_claro(tmp_path, monkeypatch):
@@ -334,3 +344,12 @@ def test_chave_do_celular_fixada_na_primeira_vez_e_troca_recusada(tmp_path, monk
     for ruim in ("curta==", base64.b64encode(bytes(32)).decode()):  # curta e ponto de ordem baixa
         publicada["pub"] = ruim
         assert organiza.chave_celular("k") is None
+
+
+def test_diario_que_nao_abre_sai_da_janela_das_pendentes(tmp_path, monkeypatch):
+    urls = []
+    organiza._FALHARAM.add("diario-ruim-0001")
+    monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: (urls.append(u), {"capturas": []})[1])
+    monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
+    organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json")
+    assert urls[0].endswith("/pendentes?pular=diario-ruim-0001")

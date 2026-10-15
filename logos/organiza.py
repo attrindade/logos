@@ -305,6 +305,11 @@ def _sumiu(e: Exception) -> bool:
     return isinstance(e, urllib.error.HTTPError) and e.code == 404
 
 
+# Notas que não abrem (chave trocada) ou falham sempre: pedidas fora da janela das pendentes.
+_FALHARAM: set[str] = set()
+_TENTATIVAS: dict[str, int] = {}
+
+
 def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int, int]:
     """Uma volta: entrega as pendentes e avisa as que viraram nota. Devolve (entregues, notas).
     Cada nota tem o seu try: uma com defeito não segura as outras na fila."""
@@ -317,8 +322,23 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
     def audio(parte_id: str) -> str:
         return _pedido("GET", f"{URL}/partes?id={parte_id}", key).get("audio") or ""
 
-    for c in _pedido("GET", URL + "/pendentes", key).get("capturas", []):
+    pular = ",".join(list(_FALHARAM)[:50])
+    for c in _pedido("GET", URL + "/pendentes" + (f"?pular={pular}" if pular else ""), key).get("capturas", []):
         diario = eh_diario(c)
+        # "pegando" antes de baixar: a partir daqui o celular não reabre nem acrescenta (revisão de
+        # 14/10: uma parte que entrasse no meio da entrega sumia calada). 409 = reabriu antes.
+        try:
+            _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "pegando"})
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                logger.info(f"Organiza: {c.get('id')} reaberta no celular antes da entrega; fica para depois")
+                continue
+            if e.code != 400:  # 400 = Semana antiga, sem "pegando": segue como antes
+                logger.warning(f"Organiza: 'pegando' de {c.get('id')} falhou: {e}")
+                continue
+        except Exception as e:
+            logger.warning(f"Organiza: 'pegando' de {c.get('id')} falhou: {e}")
+            continue
         try:
             if diario:
                 chave_cofre = chave_cofre or cofre.carregar_ou_criar()
@@ -328,8 +348,10 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
                 c = dict(c, marcas_abertas=abrir_marcas(c, chave_cofre))
             destino = entregar(c, inbox, oficina, audio)
         except cofre.CofreErro as e:
-            # Fica na nuvem (o envelope some quando vira "pc"): com a chave certa de volta, abre.
+            # Fica na nuvem (o envelope some quando vira "pc"): com a chave certa de volta, abre. Até
+            # o drenador reiniciar, não volta a ocupar a janela de 10 das pendentes.
             logger.warning(f"Organiza: Diário {c.get('id')} não abre: {e}")
+            _FALHARAM.add(c["id"])
             continue
         except ValueError as e:
             if c.get("partes") or diario:
@@ -345,6 +367,9 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
             continue
         except Exception as e:
             logger.warning(f"Organiza: {c.get('id')} não foi entregue nesta volta: {e}")
+            _TENTATIVAS[c["id"]] = _TENTATIVAS.get(c["id"], 0) + 1
+            if _TENTATIVAS[c["id"]] >= 5:
+                _FALHARAM.add(c["id"])
             continue
         entregues[c["id"]] = destino.name
         if diario:
@@ -493,13 +518,23 @@ def main() -> None:
             pedidos_do_celular(key)
             vigia_ao_celular(key)
             from . import acoes_celular
-            if time.time() - ultima_ida >= IDA_S or acoes_celular.ida_pedida():
+            if time.time() - ultima_ida >= IDA_S or acoes_celular.ida_pedida() or briefing_novo(ultima_ida):
                 ultima_ida = time.time()
                 ida_ao_celular(key)
         time.sleep(INTERVALO_S)
 
 
 IDA_S = 600
+
+
+def briefing_novo(desde: float) -> bool:
+    """O briefing das 8h mudou depois da última ida: vai já (o aviso das 8h15 abre o de hoje)."""
+    try:
+        from . import consulta
+        pasta = consulta.vault_root() / "briefings"
+        return any(f.stat().st_mtime > desde for f in pasta.glob("*.md"))
+    except Exception:
+        return False
 
 
 def fila_ao_celular(key: str) -> None:

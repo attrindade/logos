@@ -75,7 +75,7 @@ def test_send_dos_jobs_entra_no_registro(tmp_path, monkeypatch):
     telegram.send("Job promover falhou: timeout.", None)
     telegram.send(None, tmp_path / "Briefing 2026-10-15.md")
     textos = [e["texto"] for e in eventos.ultimos()]
-    assert "Enviado: Briefing 2026-10-15.md" in textos
+    assert "Pronto: Briefing 2026-10-15.md" in textos
     assert any(e["nivel"] == "falha" for e in eventos.ultimos())
 
 

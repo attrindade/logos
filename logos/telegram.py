@@ -1143,7 +1143,7 @@ def send(text: str | None, file: Path | None) -> int:
     # Os jobs do vault avisam por aqui (`python -m logos.telegram send`): o aviso entra no registro
     # da aba Logos do Organiza antes do Telegram. Repetição (3 tentativas) não duplica.
     from . import eventos
-    resumo = (text or "").strip() or (f"Enviado: {file.name}" if file is not None else "")
+    resumo = (text or "").strip() or (f"Pronto: {file.name}" if file is not None else "")
     if file is not None and text:
         resumo = f"{text.strip()}\n{file.name}"
     eventos.registrar("jobs", resumo, eventos.nivel_de(resumo))
@@ -1186,6 +1186,9 @@ def send(text: str | None, file: Path | None) -> int:
 
 
 def check() -> int:
+    if not BOT_LIGADO:
+        print("Bot desligado desde 14/10/2026 (BOT_LIGADO em logos/telegram.py); o painel é a aba Logos do Organiza.")
+        return EXIT_OK
     token = get_token()
     if not token:
         print(f"Sem token: grave telegram_token em {secrets_path()} ou defina LOGOS_TELEGRAM_TOKEN.")

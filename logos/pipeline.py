@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -192,9 +193,39 @@ def process_path(path: Path, ledger: Ledger) -> None:
     process_file(path, ledger)
 
 
+# Nomes sendo processados agora. O ledger só marca o fim (ENRICHED): sem isto, a varredura de 10 min
+# (thread principal do watcher) pegava o pacote que o observer ainda processava, e saíam duas notas
+# da mesma fala (as capturas duplicadas de 14/10/2026, revisão da etapa F).
+_EM_ANDAMENTO: set[str] = set()
+_EM_ANDAMENTO_LOCK = threading.Lock()
+
+
+def _pegar(nome: str) -> bool:
+    with _EM_ANDAMENTO_LOCK:
+        if nome in _EM_ANDAMENTO:
+            return False
+        _EM_ANDAMENTO.add(nome)
+        return True
+
+
+def _soltar(nome: str) -> None:
+    with _EM_ANDAMENTO_LOCK:
+        _EM_ANDAMENTO.discard(nome)
+
+
 def process_file(path: Path, ledger: Ledger) -> None:
     if is_ignored(path.name):
         return
+    if not _pegar(path.name):
+        logger.info(f"{path.name} já está sendo processado por outra thread; esta passa.")
+        return
+    try:
+        _process_file(path, ledger)
+    finally:
+        _soltar(path.name)
+
+
+def _process_file(path: Path, ledger: Ledger) -> None:
 
     try:
         stat = path.stat()
@@ -431,6 +462,16 @@ def _bundle_size(path: Path) -> int:
 
 
 def process_bundle(path: Path, ledger: Ledger) -> None:
+    if not _pegar(path.name):
+        logger.info(f"Pacote {path.name} já está sendo processado por outra thread; esta passa.")
+        return
+    try:
+        _process_bundle_pegado(path, ledger)
+    finally:
+        _soltar(path.name)
+
+
+def _process_bundle_pegado(path: Path, ledger: Ledger) -> None:
     loaded = read_manifest(path)
     if loaded is None:
         logger.warning(f"Pacote sem manifest legível, ignorado por ora: {path.name}")

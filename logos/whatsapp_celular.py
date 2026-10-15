@@ -30,6 +30,7 @@ MAX_GRUPOS = 10
 MAX_HISTORICO = 10    # respondidas hoje e adiadas, cada
 MAX_MENSAGENS = 25    # por conversa
 MAX_TEXTO = 2000      # por mensagem; o envelope inteiro cabe em 1,5 MB na Semana
+MAX_ENV = 1_450_000   # abaixo do limite da Semana
 ID = "whatsapp"  # dados associados do envelope: só serve como a fila do WhatsApp
 
 
@@ -205,6 +206,13 @@ def passo(key: str) -> bool | None:
         pass
     doc["gerado_em"] = int(time.time())
     env = cofre.selar_para_celular(json.dumps(doc, ensure_ascii=False).encode("utf-8"), ID, pub)
+    if len(json.dumps(env)) > MAX_ENV:
+        # Grande demais para a Semana (1,5 MB): menos mensagens por conversa e menos pessoas.
+        for it in doc["itens"]:
+            it["mensagens"] = it.get("mensagens", [])[-8:]
+        doc["pessoas"] = doc.get("pessoas", [])[:150]
+        env = cofre.selar_para_celular(json.dumps(doc, ensure_ascii=False).encode("utf-8"), ID, pub)
+        logger.warning("WhatsApp no celular: fila grande demais, mandada encurtada")
     organiza._pedido("PUT", URL, key, {"chave": "whatsapp", "env": json.dumps(env)})
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(marca, encoding="utf-8")

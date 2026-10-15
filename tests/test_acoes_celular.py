@@ -4,7 +4,7 @@ import json
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from logos import acoes_celular, cofre, organiza, pipeline
+from logos import acoes_celular, cofre, config, organiza, pipeline
 
 
 @pytest.fixture
@@ -102,3 +102,47 @@ def test_aplicar_marcas_poe_as_escolhidas_primeiro_sem_repetir():
     assert e["pessoas"] == ["[[Clara]]"] and e["times"] == ["[[PPJ]]"]
     assert e["responde_a"] == "[[Organiza]]" and e["responde_trecho"] == "x"
     pipeline.aplicar_marcas(e, None)  # sem marcas, nada muda
+
+
+def _acao(chave_pub, aid, tipo, dados):
+    return {"id": aid, "tipo": tipo, "env": json.dumps(cofre.selar(json.dumps(dados).encode(), aid, chave_pub))}
+
+
+def test_tipo_de_fora_precisa_bater_com_o_de_dentro(tmp_path, monkeypatch):
+    monkeypatch.setattr(acoes_celular, "contatos_path", lambda: tmp_path / "c.json")
+    chave = X25519PrivateKey.generate()
+    a = _acao(cofre.publica_b64(chave), "acao-0001", "contatos", {"tipo": "analisar", "jid": "x"})
+    estado, frase = acoes_celular._executar("k", a, chave, tmp_path)
+    assert estado == "falha" and "tipo" in frase
+    assert not (tmp_path / "c.json").exists()  # a lista não foi apagada
+
+
+def test_concluir_espera_o_job_do_vault(tmp_path, monkeypatch):
+    from logos import jobs
+    monkeypatch.setattr(jobs, "lock_dono", lambda: {"pid": 1})
+    chave = X25519PrivateKey.generate()
+    a = _acao(cofre.publica_b64(chave), "acao-0002", "concluir", {"tipo": "concluir", "caminho": "work/active/X.md", "texto": "a"})
+    with pytest.raises(acoes_celular.Ocupado):
+        acoes_celular._executar("k", a, chave, tmp_path)
+
+
+def test_acao_feita_nao_e_refeita_quando_o_ok_nao_chegou(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    chave = X25519PrivateKey.generate()
+    monkeypatch.setattr(cofre, "carregar_ou_criar", lambda: chave)
+    a = _acao(cofre.publica_b64(chave), "acao-0003", "contatos", {"tipo": "contatos", "lista": []})
+    puts, rodou = [], []
+    monkeypatch.setattr(acoes_celular, "_pedido", lambda m, u, k, c=None: (
+        {"acoes": [dict(a)]} if m == "GET" else (puts.append(c), (_ for _ in ()).throw(OSError("rede")))[1]))
+    orig = acoes_celular._executar
+    monkeypatch.setattr(acoes_celular, "_executar", lambda *x: (rodou.append(1), orig(*x))[1])
+    acoes_celular.passo("k", raiz=tmp_path)
+    acoes_celular.passo("k", raiz=tmp_path)
+    assert len(rodou) == 1 and len(puts) == 2  # executou uma vez, reenviou o estado na segunda
+
+
+def test_pacote_nao_e_processado_por_duas_threads(monkeypatch, tmp_path):
+    assert pipeline._pegar("p1") and not pipeline._pegar("p1")
+    pipeline._soltar("p1")
+    assert pipeline._pegar("p1")
+    pipeline._soltar("p1")
