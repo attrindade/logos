@@ -13,7 +13,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import config, sono
+from . import config, grava_drive, sono
 from .ledger import Entry, Ledger, State
 from .pipeline import process_bundle, process_file, read_manifest, retry_failed
 from .status import PipelineStage, tracker
@@ -231,6 +231,16 @@ class _InboxHandler(FileSystemEventHandler):
             tracker.set_idle()
 
 
+def _espelhar_grava(ledger: Ledger) -> None:
+    """Uma passada do espelho do Grava no Drive, em thread própria (grava_drive.iniciar_passada):
+    copiar uma gravação de horas para o G: não pode segurar a transcrição. Nada aqui derruba o watcher.
+    O ledger em memória diz ao espelho qual gravação transcrita a fala mandou para o Diário."""
+    try:
+        grava_drive.iniciar_passada(ledger)
+    except Exception:
+        logger.exception("Espelho do Grava não começou; tento de novo na próxima varredura.")
+
+
 def run():
     config.ensure_directories()
 
@@ -272,6 +282,8 @@ def run():
     # O bot só entrega arquivos e pacotes na Inbox; o observer acima os processa como qualquer chegada.
     stop_bot = threading.Event()
     start_bot_thread(stop_bot)
+    # Antes da varredura inicial pelo mesmo motivo do bot: ela pode levar horas.
+    _espelhar_grava(ledger)
 
     logger.info("Varredura inicial da Inbox (cobre arquivos chegados offline e retomadas pendentes)...")
     retry_failed(ledger)
@@ -290,6 +302,7 @@ def run():
             sono.verificar()
             if datetime.now() - last_rescan >= timedelta(minutes=RESCAN_INTERVAL_MIN):
                 _subscribe_pending(observer, handler, observadas)
+                _espelhar_grava(ledger)
                 scan_inbox(ledger)
                 last_rescan = datetime.now()
             if datetime.now() - last_daily_check >= timedelta(days=1):

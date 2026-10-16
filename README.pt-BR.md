@@ -67,7 +67,7 @@ Manutenção: `python main.py --limpar-fantasmas` remove do ledger as falhas dei
 O Logos iniciará o processo residente (*watcher*):
 1. Faz varredura da pasta `Inbox/` inicial e retoma pendências se houver.
 2. Monitora a chegada de novas gravações e de notas de texto `.txt`/`.md` continuamente. Texto pula o Whisper; arquivo sem nome `AAAA-MM-DD HH-MM-SS` é datado pelo horário de modificação.
-   - **Vocabulário de rotas:** a primeira palavra escolhe a rota (`diário`, `planejamento`, qualquer outra → Inbox). Na Inbox, `tarefa`, `ideia` e `reunião` preenchem `categoria` por regra, e `tarefa urgente` define `prioridade: alta`.
+   - **Vocabulário de rotas:** a primeira palavra escolhe a rota (`diário`, `planejamento`, qualquer outra → Inbox). Na Inbox, `tarefa`, `ideia`, `reunião`, `entrevista` e `rpg` preenchem `categoria` por regra, e `tarefa urgente` define `prioridade: alta`. Gravação do Grava traz o tipo logo depois da hora (`2026-10-15 22-21-50 reuniao Conselho.m4a`); essa palavra fixa a `categoria` e manda sobre a falada, mas a rota continua vindo da fala (só `diario` no nome força o Diário).
    - **Frontmatter:** toda nota registra `fonte_tipo` (`audio`, `texto`) e `canal` (`syncthing`, ou `telegram` para arquivos `… tg.<ext>`).
    - **ActivityWatch:** cada captura concluída posta um evento `logos.capture` no bucket `aw-watcher-logos_<hostname>` (`{rota, canal, tipo, duracao_audio_s, processamento_s}`); ignorado em silêncio se o `:5600` não responder.
 3. Transcreve com Whisper e salva o texto integral verbatim em `Transcripts/`.
@@ -236,4 +236,13 @@ llm_model: "gemma4:e4b"    # opcional: gemma4:26b
 llm_min_words: 40          # notas mais curtas pulam a LLM (título = 8 primeiras palavras)
 archive_retention_days: 60
 gadgetbridge_db: "~/Sync/gadgetbridge/Gadgetbridge"  # opcional: cópia exportada pelo Gadgetbridge
+extra_inbox_dirs:          # observadas também, só áudio, sem subpastas
+  - "~/Logos/Grava/transcrever"
+grava_dir: "~/Logos/Grava"                 # padrão: <data_root>/Grava
+grava_drive_dir: "G:/Meu Drive/Grava"      # padrão; "" desliga o espelho no Drive
+grava_drive_excluir: ["terapia"]           # padrão; palavras que nunca vão ao Drive (diario vale sempre)
 ```
+
+**Pastas do Grava.** O app gravador Grava manda o que não é Diário para `Recordings/Grava/`, pasta do Syncthing (celular só envia, PC só recebe, sem repetir exclusões) que chega em `grava_dir`: `transcrever/` tem todos os tipos que o Logos transcreve (entra em `extra_inbox_dirs`) e `guardar/<apelido>/` chega ao PC mas não é transcrita. O Diário segue pelo caminho dele (`Recordings/Diarios` → `Inbox/`) e nunca vai ao Drive.
+
+**Espelho no Drive** (`logos/grava_drive.py`). Na subida e a cada varredura de 10 min, numa thread própria, o watcher **copia** (nunca move nem apaga) os áudios de `grava_dir` (com subpastas) para `<grava_drive_dir>/<apelido>/<mesmo nome>`; o apelido é a primeira palavra depois da hora, `outros` quando não há. Ficam de fora: qualquer palavra do nome ou das pastas que comece com `diario` (com ou sem o padrão de data, como `diariointimo`) ou com um item de `grava_drive_excluir`, nomes começando com `.`, temporários do Syncthing, arquivo modificado há menos de 2 min ou cujo tamanho mudou desde a última passada, e o que já está lá com o mesmo tamanho (tamanho diferente fica como está, com aviso no log). Áudio de pasta observada (`transcrever/`) só vai depois que o ledger mostra que ele foi transcrito e que a fala não o mandou para o Diário (a rota continua vindo da primeira palavra dita); antes disso, ou se a transcrição falhou, espera. A cópia vai para um nome temporário com ponto e entra de uma vez com `os.replace`; se a cópia da data e dos atributos falhar, os bytes vão assim mesmo. O espelho se recusa a rodar, com aviso único, quando `grava_dir` contém a Inbox, o Archive ou Transcripts, ou quando `grava_drive_dir` fica dentro de `grava_dir` ou de uma pasta observada. Sem a pasta-mãe de `grava_drive_dir` (`G:/Meu Drive`), registra no log uma vez e segue. O Drive para computador monta o Drive em `G:`, então não há projeto no Google Cloud.

@@ -20,6 +20,10 @@ os.environ["LOGOS_VAULT_DIR"] = str(_TEST_ROOT / "vault")
 # Vazio = nenhuma pasta extra. Sem isto a suíte herdaria o extra_inbox_dirs do
 # logos_config.yaml e varreria a pasta real do Google Drive do dono.
 os.environ["LOGOS_EXTRA_INBOX_DIRS"] = ""
+# Vazio = espelho do Grava desligado. Sem isto a suíte leria a pasta real do Grava e copiaria
+# para o G: de verdade; os testes do espelho passam as pastas temporárias explicitamente.
+os.environ["LOGOS_GRAVA_DIR"] = ""
+os.environ["LOGOS_GRAVA_DRIVE_DIR"] = ""
 # Porta fechada: process_file real nos testes não pode postar capturas falsas no ActivityWatch.
 os.environ["LOGOS_AW_PORT"] = "1"
 # Nenhum teste carrega modelo de visão no Ollama; os de extração ligam o que precisam.

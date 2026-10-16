@@ -31,6 +31,9 @@ _CATEGORIAS = {
     "tarefa": "tarefa", "tarefas": "tarefa",
     "ideia": "ideia", "ideias": "ideia",
     "reuniao": "reuniao", "reunioes": "reuniao",
+    # Tipos do Grava (15/10/2026); também valem ditos como primeira palavra.
+    "entrevista": "entrevista", "entrevistas": "entrevista",
+    "rpg": "rpg",
 }
 
 # Sufixo no nome dos arquivos gravados pelo bot: "2026-09-14 15-02-11 tg 123.txt" (123 = message_id).
@@ -183,12 +186,29 @@ def route_from_filename(filename) -> Route | None:
     return None
 
 
+def categoria_from_filename(filename) -> str:
+    """Categoria declarada no nome do arquivo pelo apelido do tipo no Grava, a primeira palavra
+    depois da hora ("2026-10-15 22-21-50 reuniao Conselho.m4a" -> "reuniao").
+
+    Só os apelidos que já são categoria (_CATEGORIAS): um apelido criado pelo dono, o "tg" do bot
+    e o "app" do Organiza não fixam nada. O tipo foi escolhido num botão do app, então manda
+    sobre a primeira palavra falada; a rota, não — ela continua só com o Diário (route_from_filename).
+    """
+    m = _name_match(filename)
+    words = (m.group("tag") or "").split() if m else []
+    return _CATEGORIAS.get(_normalize_word(words[0]), "") if words else ""
+
+
 def triage(filename: str, transcript: str = "", fallback: datetime | None = None) -> Triage:
     """Realiza a triagem combinando o timestamp do arquivo e a rota pelo conteúdo falado
     (ou pelo nome do arquivo, quando ele declara o Diário)."""
     recorded_at = triage_from_filename(filename, fallback)
     route = route_from_filename(filename) or triage_route_from_text(transcript)
     categoria, prioridade = triage_category_from_text(transcript) if route == Route.INBOX else ("", "")
+    do_nome = categoria_from_filename(filename) if route == Route.INBOX else ""
+    if do_nome and do_nome != categoria:
+        # "tarefa urgente" dito numa gravação de reunião não vira prioridade de uma reunião.
+        categoria, prioridade = do_nome, ""
     return Triage(
         route=route, recorded_at=recorded_at, tag=route.value,
         categoria=categoria, prioridade=prioridade, canal=canal_from_filename(filename),

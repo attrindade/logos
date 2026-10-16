@@ -72,7 +72,7 @@ Maintenance: `python main.py --limpar-fantasmas` removes ledger failures left by
 
 ### What happens in the pipeline:
 1. **Inbox Scan & Watcher:** Detects incoming voice recordings and `.txt`/`.md` text notes while ensuring write stability. Text skips Whisper; files without a `YYYY-MM-DD HH-MM-SS` name are dated by modification time.
-   - **Route vocabulary:** the first word picks the route (`diário`, `planejamento`, anything else → Inbox). In Inbox, `tarefa`, `ideia` and `reunião` set `categoria` by rule, and `tarefa urgente` sets `prioridade: alta`.
+   - **Route vocabulary:** the first word picks the route (`diário`, `planejamento`, anything else → Inbox). In Inbox, `tarefa`, `ideia`, `reunião`, `entrevista` and `rpg` set `categoria` by rule, and `tarefa urgente` sets `prioridade: alta`. A Grava recording names its type right after the time (`2026-10-15 22-21-50 reuniao Conselho.m4a`); that word sets `categoria` over the spoken one, while the route still comes from speech (only `diario` in the name forces the Diário).
    - **Frontmatter:** every note records `fonte_tipo` (`audio`, `texto`) and `canal` (`syncthing`, or `telegram` for files named `… tg.<ext>`).
    - **ActivityWatch:** each finished capture posts a `logos.capture` event to bucket `aw-watcher-logos_<hostname>` (`{rota, canal, tipo, duracao_audio_s, processamento_s}`); silently skipped if `:5600` is down.
 2. **STT (Whisper):** Transcribes audio directly to raw verbatim text saved in `Transcripts/`.
@@ -188,6 +188,7 @@ logos/
 ├── consulta.py           # Vault reads from the chat (/ver, /buscar, /hoje)
 ├── extractors.py         # OCR, vision, PDF, .docx and link text for attachments
 ├── aw.py                 # ActivityWatch event per capture
+├── grava_drive.py        # Copies Grava recordings to the Drive (G:), never the Diário
 └── prompts/              # Route prompt templates (diario.txt, planejamento.txt, inbox.txt)
 
 setup.py                  # Interactive TUI installer & diagnostic assistant
@@ -214,4 +215,13 @@ ollama_keep_alive: "10m"   # keeps the model loaded between notes
 llm_model: "gemma4:e4b"    # optional: gemma4:26b
 llm_min_words: 40          # shorter notes skip the LLM (title = first 8 words)
 archive_retention_days: 60
+extra_inbox_dirs:          # also watched, audio only, not recursive
+  - "~/Logos/Grava/transcrever"
+grava_dir: "~/Logos/Grava"                 # default: <data_root>/Grava
+grava_drive_dir: "G:/Meu Drive/Grava"      # default; "" turns the Drive mirror off
+grava_drive_excluir: ["terapia"]           # default; words never mirrored (diario always is)
 ```
+
+**Grava folders.** The Grava recorder app on the phone sends everything that is not Diário to `Recordings/Grava/`, a Syncthing folder (phone send only, PC receive only, deletions ignored) that lands in `grava_dir`: `transcrever/` holds every type Logos transcribes (add it to `extra_inbox_dirs`), and `guardar/<apelido>/` reaches the PC but is not transcribed. The Diário keeps its own path (`Recordings/Diarios` → `Inbox/`) and never goes to the Drive.
+
+**Drive mirror** (`logos/grava_drive.py`). On startup and on every 10-minute rescan, in its own thread, the watcher **copies** (never moves or deletes) the audio under `grava_dir` (recursive) to `<grava_drive_dir>/<apelido>/<same name>`; the apelido is the first word after the time, `outros` when there is none. Skipped: any word of the name or folders starting with `diario` (with or without the date pattern, e.g. `diariointimo`) or with an item of `grava_drive_excluir`, names starting with `.`, Syncthing temp files, files modified less than 2 min ago or whose size changed since the last pass, and files already there with the same size (a different size is left alone, with a warning). Audio in a watched folder (`transcrever/`) is copied only after the ledger shows it was transcribed and the speech did not send it to the Diário (the route still comes from the first spoken word); until then, or if transcription failed, it waits. Copies go to a dot-prefixed temp name and are swapped in with `os.replace`; if copying the date and attributes fails, the bytes still go. The mirror refuses to run, warning once, when `grava_dir` contains the Inbox, Archive or Transcripts, or when `grava_drive_dir` is inside `grava_dir` or a watched folder. If the parent of `grava_drive_dir` (`G:/Meu Drive`) is missing, it logs once and moves on. The Drive for Desktop mounts the Drive as `G:`, so no Google Cloud project is involved.

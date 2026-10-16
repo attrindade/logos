@@ -59,6 +59,30 @@ def inbox_dirs() -> list[Path]:
     return [INBOX_DIR, *(d for d in EXTRA_INBOX_DIRS if d != INBOX_DIR)]
 
 
+# Espelho do Grava no Drive (logos/grava_drive.py): copia o que o Syncthing trouxe do celular
+# para Recordings/Grava (transcrever/ e guardar/<apelido>/) para "<grava_drive_dir>/<apelido>/".
+# O Drive for Desktop monta o Drive em G:, então é cópia entre pastas locais, sem projeto no
+# Google Cloud. Vazio desliga, no yaml ou na variável — `is not None` pelo mesmo motivo de
+# EXTRA_INBOX_DIRS: os testes desligam pela variável vazia e nunca podem escrever no G: real.
+def _opcional(env: str, chave: str, padrao: str) -> str:
+    valor = os.getenv(env)
+    if valor is None:
+        valor = _user_cfg.get(chave, padrao)
+    return str(valor or "").strip()
+
+
+_raw_grava_dir = _opcional("LOGOS_GRAVA_DIR", "grava_dir", str(DATA_ROOT / "Grava"))
+GRAVA_DIR = Path(_raw_grava_dir).expanduser().resolve() if _raw_grava_dir else None
+# Sem resolve(): com o Drive desmontado a letra nem existe, e o caminho tem de ficar como foi escrito.
+_raw_grava_drive = _opcional("LOGOS_GRAVA_DRIVE_DIR", "grava_drive_dir", "G:/Meu Drive/Grava")
+GRAVA_DRIVE_DIR = Path(_raw_grava_drive).expanduser() if _raw_grava_drive else None
+# Palavras que, no nome do arquivo ou de uma pasta, nunca vão ao Drive (comparação sem acento e
+# por começo de palavra: "terapia" pega "Terapias"). O Diário fica de fora sempre, esteja ou não
+# na lista; ela serve para acrescentar outros sem mexer em código (gotcha da terapia no vault).
+_raw_excluir = _user_cfg.get("grava_drive_excluir")
+GRAVA_DRIVE_EXCLUIR = [str(p) for p in _raw_excluir] if isinstance(_raw_excluir, list) else ["terapia"]
+
+
 _raw_notes_dir = os.getenv("LOGOS_NOTES_DIR") or _user_cfg.get("notes_dir")
 NOTES_DIR = Path(_raw_notes_dir).expanduser().resolve() if _raw_notes_dir else DATA_ROOT / "Notes"
 

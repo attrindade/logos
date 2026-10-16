@@ -18,7 +18,7 @@ titulo: título claro e descritivo (até 8 palavras) capturando o cerne da nota
 tags:
   - palavra1
   - palavra2
-categoria: insight, tarefa, reuniao, referencia ou ideia
+categoria: insight, tarefa, reuniao, entrevista, rpg, referencia ou ideia
 resumo: 1 a 3 frases resumindo a ideia ou fato principal
 takeaways: []
 acoes: []

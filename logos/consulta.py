@@ -883,7 +883,7 @@ def render_inicio(notas: list[Path], briefing: Path | None, ctx: Contexto) -> Te
 # tarefa, insight, reunião. Categoria nova aparece sozinha — é lida das notas a cada consulta.
 ROTULOS_CATEGORIA = {
     "tarefa": "Tarefas", "ideia": "Ideias", "insight": "Insights", "reuniao": "Reuniões",
-    "referencia": "Referências",
+    "referencia": "Referências", "entrevista": "Entrevistas", "rpg": "RPG",
 }
 MARCA_PESSOA = "\U0001f464"
 MARCA_TIME = "\U0001f465"
