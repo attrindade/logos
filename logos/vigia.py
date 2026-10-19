@@ -4,8 +4,8 @@ eventos (`eventos.py`), para a aba Logos do app Organiza (pedido dele em 14/10).
 Roda no laço do drenador (`python -m logos.organiza`): confere a cada CHECAGEM_S e manda, fechado
 com a chave do celular, para a Semana (`/api/cifrados`, chave "logos"), quando algo mudou e no
 mínimo a cada PUBLICA_S. Quem vigia o vigia é o celular: a hora do envio é o sinal de vida do PC, e
-a aba avisa quando ela fica velha (PC desligado, drenador parado ou sem rede). Uma tarefa agendada à
-parte seria mais uma peça para operar (sugestão minha, a confirmar com ele).
+a aba avisa quando ela fica velha (PC desligado, drenador parado ou sem rede). Desde 19/10 a tarefa
+agendada \attrindade\Servicos vigia (`_cli/servicos.ps1 vigiar`) religa watcher, drenador e Assistente parados.
 
 Só leitura: nenhuma checagem reinicia, mata ou muda nada. O `status.json` do watcher tem escritor
 único (o StatusTracker): aqui ele só é lido.
