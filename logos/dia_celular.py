@@ -80,7 +80,7 @@ Como pensar (Cal Newport: quando o plano quebra, refaça os blocos do resto do d
 Operações (o bloco é achado pelo dia AAAA-MM-DD e pela hora de início HH:MM, no plano como está):
 - {"op":"mover","tarefa":ID,"dia":D,"bloco":HH:MM} leva a tarefa (pelo id) para um bloco de trabalho.
 - {"op":"horario","dia":D,"bloco":HH:MM,"i":HH:MM,"f":HH:MM,"para":D2?} muda o horário (e o dia, com para).
-- {"op":"novo","dia":D,"i":HH:MM,"f":HH:MM,"k":gov|ppj|ren|leve|pausa|livre,"nome":"...","tarefas":["texto"]?}
+- {"op":"novo","dia":D,"i":HH:MM,"f":HH:MM,"k":gov|ppj|ren|pesq|leve|pausa|livre,"nome":"...","tarefas":["texto"]?}
 - {"op":"tirar","dia":D,"bloco":HH:MM} só bloco sem tarefas (mova ou corte antes).
 - {"op":"cortar","tarefa":ID} a tarefa sai da semana; volta na preparação do fim de semana.
 As operações valem em ordem: a segunda já vê o plano mudado pela primeira. Pausa e livre não levam tarefas.
