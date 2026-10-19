@@ -267,7 +267,7 @@ def _executar(key: str, a: dict, chave, raiz: Path) -> tuple[str, str]:
         if alvo not in SERVICOS:
             return "falha", "Serviço fora da lista."
         _REINICIOS.append(alvo)
-        eventos.registrar("organiza", f"Reinício de {SERVICOS[alvo]} pedido pelo celular.")
+        eventos.registrar("organiza", f"Pedido do celular: reiniciar {SERVICOS[alvo]}.")
         return "ok", f"Reiniciando {SERVICOS[alvo]}: o resultado aparece no registro em até 1 min."
     return "falha", "Ação desconhecida."
 
@@ -282,11 +282,10 @@ def reiniciar_solto(alvo: str) -> None:
     if not exe or not SERVICOS_PS1.exists():
         eventos.registrar("organiza", "Reinício pedido pelo celular não rodou: falta o pwsh ou o servicos.ps1.", "falha")
         return
-    flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    subprocess.Popen([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(SERVICOS_PS1),
-                      "reiniciar", alvo, "-Atraso", "3"], creationflags=flags, close_fds=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # -Solto: o script se relança pelo WMI, fora da árvore deste processo, e volta na hora.
+    subprocess.run([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(SERVICOS_PS1),
+                    "reiniciar", alvo, "-Atraso", "3", "-Solto"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
 
 
 _IDA = threading.Event()
