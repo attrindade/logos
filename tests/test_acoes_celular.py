@@ -141,6 +141,23 @@ def test_acao_feita_nao_e_refeita_quando_o_ok_nao_chegou(tmp_path, monkeypatch):
     assert len(rodou) == 1 and len(puts) == 2  # executou uma vez, reenviou o estado na segunda
 
 
+def test_servico_reinicia_depois_de_gravar_o_estado_e_so_da_lista(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    chave = X25519PrivateKey.generate()
+    monkeypatch.setattr(cofre, "carregar_ou_criar", lambda: chave)
+    pub = cofre.publica_b64(chave)
+    acoes = [_acao(pub, "acao-0004", "servico", {"tipo": "servico", "alvo": "drenador"}),
+             _acao(pub, "acao-0005", "servico", {"tipo": "servico", "alvo": "logos"}),
+             _acao(pub, "acao-0006", "servico", {"tipo": "servico", "alvo": "cmd /c del"})]
+    ordem = []
+    monkeypatch.setattr(acoes_celular, "_pedido", lambda m, u, k, c=None: (
+        {"acoes": [dict(x) for x in acoes]} if m == "GET" else ordem.append(("put", c["id"], c["estado"]))))
+    monkeypatch.setattr(acoes_celular, "reiniciar_solto", lambda alvo: ordem.append(("reinicia", alvo)))
+    acoes_celular.passo("k", raiz=tmp_path)
+    assert ordem == [("put", "acao-0004", "ok"), ("put", "acao-0005", "ok"), ("put", "acao-0006", "falha"),
+                     ("reinicia", "logos")]  # o logos já leva o drenador; o alvo de fora da lista não roda
+
+
 def test_pacote_nao_e_processado_por_duas_threads(monkeypatch, tmp_path):
     assert pipeline._pegar("p1") and not pipeline._pegar("p1")
     pipeline._soltar("p1")

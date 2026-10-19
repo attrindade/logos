@@ -12,6 +12,10 @@ O celular fecha cada ação com a chave do PC (o mesmo cofre do Diário) e põe 
                (`/api/cifrados`, chave "analises"). O Assistente não muda.
     contatos   a lista "manter contato" (quem e a cada quantos dias). A última que chega vale; a
                fila do WhatsApp (`whatsapp_celular`) devolve a data da última conversa de cada um.
+    servico    reinicia um serviço do PC (19/10/2026, "painel de controle de qualquer lugar"):
+               assistente, watcher, drenador ou logos, só desta lista. Quem reinicia é o
+               `C:\\Workspace\\_cli\\servicos.ps1`, solto do drenador e depois de a ação já constar
+               como feita, porque reiniciar o drenador mata este laço.
 
 Responder a uma nota não passa por aqui: vai como anotação comum, com a nota nas marcas.
 Teste: `python -m logos.acoes_celular --uma-vez`.
@@ -22,6 +26,8 @@ import argparse
 import json
 import logging
 import re
+import shutil
+import subprocess
 import threading
 import time
 import unicodedata
@@ -40,6 +46,9 @@ MAX_ANALISES = 15
 MAX_MSGS_ANALISE = 60
 MAX_CONTATOS = 200
 ID_ANALISES = "analises"  # dados associados do envelope
+SERVICOS_PS1 = Path(r"C:\Workspace\_cli\servicos.ps1")
+SERVICOS = {"assistente": "o Assistente", "watcher": "o watcher do Logos", "drenador": "o drenador",
+            "logos": "o Logos (watcher e drenador)"}
 
 _TAREFA = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)\[ \](\s.*)?$")
 
@@ -253,7 +262,31 @@ def _executar(key: str, a: dict, chave, raiz: Path) -> tuple[str, str]:
     if tipo == "contatos":
         n = guardar_contatos(dados.get("lista"))
         return "ok", f"{n} pessoa(s) para manter contato."
+    if tipo == "servico":
+        alvo = str(dados.get("alvo") or "")
+        if alvo not in SERVICOS:
+            return "falha", "Serviço fora da lista."
+        _REINICIOS.append(alvo)
+        eventos.registrar("organiza", f"Reinício de {SERVICOS[alvo]} pedido pelo celular.")
+        return "ok", f"Reiniciando {SERVICOS[alvo]}: o resultado aparece no registro em até 1 min."
     return "falha", "Ação desconhecida."
+
+
+_REINICIOS: list[str] = []
+
+
+def reiniciar_solto(alvo: str) -> None:
+    """Chama o servicos.ps1 num processo que não é filho do drenador: reiniciar o drenador (ou o Logos)
+    mata este processo, e o reinício tem de seguir sem ele."""
+    exe = shutil.which("pwsh") or shutil.which("powershell")
+    if not exe or not SERVICOS_PS1.exists():
+        eventos.registrar("organiza", "Reinício pedido pelo celular não rodou: falta o pwsh ou o servicos.ps1.", "falha")
+        return
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    subprocess.Popen([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(SERVICOS_PS1),
+                      "reiniciar", alvo, "-Atraso", "3"], creationflags=flags, close_fds=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 _IDA = threading.Event()
@@ -312,6 +345,13 @@ def passo(key: str, raiz: Path | None = None) -> int:
         except Exception as e:
             logger.warning(f"Semana não ouviu o estado da ação {a.get('id')}: {e}")
         n += 1
+    # Só agora, com as ações já gravadas como feitas: o reinício pode matar este processo.
+    alvos = list(dict.fromkeys(_REINICIOS))
+    _REINICIOS.clear()
+    if "logos" in alvos:
+        alvos = [x for x in alvos if x not in ("watcher", "drenador")]
+    for alvo in alvos:
+        reiniciar_solto(alvo)
     return n
 
 
