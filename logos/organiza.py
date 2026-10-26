@@ -73,6 +73,8 @@ def nome_pacote(captura: dict) -> str:
 
 # O Diário curto do app (escolhido por ele em 14/10). O app manda o número da pergunta dentro do
 # envelope e o título sai daqui: a mesma lista está em `Anotacoes.PERGUNTAS_DIARIO` no app.
+# O app pergunta só as 3 primeiras desde 10/2026 (`Anotacoes.PERGUNTAS_APP = 3`): a 4ª, "a primeira
+# coisa de amanhã", foi para a noite do Planeja. Fica aqui para os Diários antigos com resposta 4.
 PERGUNTAS_DIARIO = (
     "Uma coisa boa de hoje, e por que ela aconteceu?",
     "O que pesou ou travou? Que nome você dá ao que sentiu?",
@@ -308,6 +310,69 @@ def _sumiu(e: Exception) -> bool:
 # Notas que não abrem (chave trocada) ou falham sempre: pedidas fora da janela das pendentes.
 _FALHARAM: set[str] = set()
 _TENTATIVAS: dict[str, int] = {}
+# Nota com partes de que nada sai (nem texto, nem voz): depois de tantas voltas vira falha
+# definitiva, guardada em disco. Antes ela voltava a cada minuto para sempre, sem aviso nenhum
+# (a de 16/10/2026 repetiu 5.437 vezes no log e ele nunca soube).
+TENTATIVAS_ILEGIVEL = 3
+
+
+def _falhas_path() -> Path:
+    return config.STATE_DIR / "organiza" / "falhas.json"
+
+
+def _ler_falhas() -> dict[str, dict]:
+    """{id: {nome, motivo, desde, tentativas}}. Apagar a linha de um id faz o drenador tentar de novo."""
+    try:
+        d = json.loads(_falhas_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _falha_definitiva(c: dict, motivo: str, diario: bool) -> None:
+    """Tira a nota da janela das pendentes de vez (também depois de reiniciar) e avisa UMA vez na
+    aba Logos. Na nuvem nada é apagado: com o defeito corrigido, basta tirar o id de falhas.json."""
+    cid = c["id"]
+    falhas = _ler_falhas()
+    _FALHARAM.add(cid)
+    if cid in falhas:
+        return
+    try:
+        nome = nome_pacote(c)
+    except (KeyError, ValueError, AttributeError):
+        nome = cid
+    falhas[cid] = {"nome": nome, "motivo": motivo[:300], "desde": int(time.time()),
+                   "tentativas": _TENTATIVAS.get(cid, 0)}
+    p = _falhas_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(falhas, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except OSError as e:
+        logger.warning(f"Organiza: não deu para guardar a falha de {cid}: {e}")
+    m = re.match(r"\d{4}-(\d\d)-(\d\d) (\d\d)-(\d\d)", nome)
+    quando = f"de {m[2]}/{m[1]} {m[3]}:{m[4]}" if m else "sem data"
+    # Nem título nem fala, de nenhuma nota (o Diário nunca manda isso para a nuvem): data e id bastam.
+    o_que = "Um Diário do celular" if diario else "Uma anotação do celular"
+    eventos.registrar(
+        "organiza",
+        f"{o_que} {quando} não virou nota: nada legível nas partes depois de {falhas[cid]['tentativas']} "
+        f"tentativas. Continua na nuvem e o PC parou de tentar (id {cid[:8]}).",
+        "falha",
+    )
+    logger.error(f"Organiza: {cid} marcada como falha definitiva ({motivo}); ver {p}")
+
+
+PULAR_MAX = 50  # ids no ?pular= das pendentes
+
+
+def _tentar_depois(c: dict, e: Exception) -> None:
+    """Falha temporária: fica para a próxima volta; depois de 5, sai da janela até reiniciar."""
+    logger.warning(f"Organiza: {c.get('id')} não foi entregue nesta volta: {e}")
+    _TENTATIVAS[c["id"]] = _TENTATIVAS.get(c["id"], 0) + 1
+    if _TENTATIVAS[c["id"]] >= 5:
+        _FALHARAM.add(c["id"])
 
 
 def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int, int]:
@@ -322,7 +387,11 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
     def audio(parte_id: str) -> str:
         return _pedido("GET", f"{URL}/partes?id={parte_id}", key).get("audio") or ""
 
-    pular = ",".join(list(_FALHARAM)[:50])
+    definitivas = _ler_falhas()
+    _FALHARAM.update(definitivas)  # as definitivas valem também depois de reiniciar
+    # A rota aceita 50 ids: as definitivas vão primeiro (revisão de 25/10, B1). Por ordem alfabética,
+    # uma definitiva podia sair do corte, voltar à janela e ganhar "pegando" a cada minuto.
+    pular = ",".join((sorted(definitivas) + sorted(_FALHARAM - definitivas.keys()))[:PULAR_MAX])
     for c in _pedido("GET", URL + "/pendentes" + (f"?pular={pular}" if pular else ""), key).get("capturas", []):
         diario = eh_diario(c)
         # "pegando" antes de baixar: a partir daqui o celular não reabre nem acrescenta (revisão de
@@ -354,9 +423,19 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
             _FALHARAM.add(c["id"])
             continue
         except ValueError as e:
+            if isinstance(e, json.JSONDecodeError):
+                # Resposta da Semana que não é JSON (página de erro no meio de um pedido de parte):
+                # problema de rede, não nota ilegível. Não pode virar falha definitiva (revisão, B1).
+                _tentar_depois(c, e)
+                continue
             if c.get("partes") or diario:
-                # Tem partes mas nada saiu delas: fica na nuvem para olhar, sem apagar nada lá.
-                logger.warning(f"Organiza: {c.get('id')} sem conteúdo legível, fica na nuvem: {e}")
+                # Tem partes mas nada saiu delas: fica na nuvem para olhar, sem apagar nada lá. Depois
+                # de TENTATIVAS_ILEGIVEL voltas, falha definitiva: sai da janela e avisa uma vez.
+                _TENTATIVAS[c["id"]] = _TENTATIVAS.get(c["id"], 0) + 1
+                logger.warning(f"Organiza: {c.get('id')} sem conteúdo legível, fica na nuvem "
+                               f"(tentativa {_TENTATIVAS[c['id']]}/{TENTATIVAS_ILEGIVEL}): {e}")
+                if _TENTATIVAS[c["id"]] >= TENTATIVAS_ILEGIVEL:
+                    _falha_definitiva(c, str(e), diario)
                 continue
             # Nenhuma parte: sai da fila da Semana, senão dez assim ocupariam a janela para sempre.
             logger.warning(f"Organiza: {e}")
@@ -366,10 +445,7 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
                 logger.warning(f"Organiza: não deu para tirar {c['id']} da fila: {e2}")
             continue
         except Exception as e:
-            logger.warning(f"Organiza: {c.get('id')} não foi entregue nesta volta: {e}")
-            _TENTATIVAS[c["id"]] = _TENTATIVAS.get(c["id"], 0) + 1
-            if _TENTATIVAS[c["id"]] >= 5:
-                _FALHARAM.add(c["id"])
+            _tentar_depois(c, e)
             continue
         entregues[c["id"]] = destino.name
         if diario:
@@ -517,6 +593,7 @@ def main() -> None:
             fila_ao_celular(key)
             pedidos_do_celular(key)
             vigia_ao_celular(key)
+            indicios_ao_celular(key)
             from . import acoes_celular
             if time.time() - ultima_ida >= IDA_S or acoes_celular.ida_pedida() or briefing_novo(ultima_ida):
                 ultima_ida = time.time()
@@ -564,6 +641,19 @@ def vigia_ao_celular(key: str) -> None:
         vigia.passo(key)
     except Exception as e:
         logger.warning(f"Vigia: volta falhou: {e}")
+
+
+def indicios_ao_celular(key: str) -> None:
+    """Propostas de "parece feito" (`logos/indicios.py`). Desligado de fábrica: sai na hora."""
+    if not config.INDICIOS_LIGADO:
+        return
+    from . import indicios
+    try:
+        n = indicios.passo(key)
+        if n:
+            logger.info(f"Indícios: {n} proposta(s) para o celular")
+    except Exception as e:
+        logger.warning(f"Indícios: volta falhou: {e}")
 
 
 def ida_ao_celular(key: str) -> None:

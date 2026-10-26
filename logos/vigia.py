@@ -5,7 +5,7 @@ Roda no laço do drenador (`python -m logos.organiza`): confere a cada CHECAGEM_
 com a chave do celular, para a Semana (`/api/cifrados`, chave "logos"), quando algo mudou e no
 mínimo a cada PUBLICA_S. Quem vigia o vigia é o celular: a hora do envio é o sinal de vida do PC, e
 a aba avisa quando ela fica velha (PC desligado, drenador parado ou sem rede). Desde 19/10 a tarefa
-agendada \attrindade\Servicos vigia (`_cli/servicos.ps1 vigiar`) religa watcher, drenador e Assistente parados.
+agendada \\attrindade\\Servicos vigia (`_cli/servicos.ps1 vigiar`) religa watcher, drenador e Assistente parados.
 
 Só leitura: nenhuma checagem reinicia, mata ou muda nada. O `status.json` do watcher tem escritor
 único (o StatusTracker): aqui ele só é lido.
@@ -48,13 +48,43 @@ OCUPADO = {"stabilizing", "transcribing", "triaging", "enriching", "writing"}
 TAREFA_FREQUENTE_S = 3600  # tarefa que roda mais que de hora em hora só entra no registro se falhar
 AW_MAX_S = 20 * 60         # o observador de janelas manda a cada poucos segundos com o PC ligado
 SYNC_CELULAR_MAX_S = 24 * 3600
+# Depois que o PC liga, o Syncthing-Fork do celular leva até ~1 h para aparecer (ele sobe em janelas
+# de ~5 min, de hora em hora; SC/feito-infra.md, 25/10/2026). Nesse tempo, não ter conectado é esperar.
+SYNC_BOOT_GRACA_S = 90 * 60
+# Passada a graça, não ter aparecido desde o boot já é atenção. E, com o PC desligado toda noite, o
+# boot zerava a conta todo dia (revisão de 25/10, A1): o último contato acima disto é atenção sempre.
+SYNC_CELULAR_SUMIDO_S = 72 * 3600
 DISCO_MIN_GB = 10
+# Uma atenção isolada (~5 min) não entra no registro: só na 2ª checagem ruim seguida (qualquer estado
+# ruim conta para a sequência). Falha entra na hora (revisão de 25/10, M2: o que alternava ok/falha ou
+# atenção/falha nunca chegava ao registro). O "voltou ao normal" só sai de um problema registrado.
+CONFIRMA_CHECAGENS = 2
 
 # Resultados de tarefa agendada que não são erro: rodando, nunca rodou, já estava rodando (o AHK
 # relança a cada 10 min e encontra a instância de pé: 0x800710E0, "pedido recusado"), tarefa sem
 # próxima execução.
 TAREFA_OK = {0, 0x41301, 0x41303, 0x80070420, 0x800710E0, 0x41300, 0x41302}
 ATRASO_TAREFA_S = 30 * 60
+# Ruído de boot (medido de 14 a 25/10/2026, ~2/3 dos "atenção" da aba): não vira atenção.
+# 0x40010004 (1073807364): o Windows encerrou o processo no desligamento — AW Alertas e AW Checkin
+# rodam o dia todo e "terminam" assim a cada vez que o PC desliga. Não entra nem no registro.
+TAREFA_ENCERRADA_NO_DESLIGAMENTO = {0x40010004}
+# 75 (jobs.EXIT_OCUPADO, `_run-claude.ps1`): no boot as tarefas atrasadas do vault disparam juntas e
+# as que perdem a trava saem sem fazer nada; o job roda na vez seguinte. Só vale para as "Vault …",
+# que são as que usam essa trava: 75 em outra tarefa continua sendo erro.
+TAREFA_OCUPADA = 75
+# O Ollama leva alguns minutos para responder depois que o PC liga (4 "falha" + "voltou ao normal"
+# em ~5 min entre 14 e 25/10). Nesse intervalo, não responder é "subindo", não falha.
+BOOT_GRACA_S = 15 * 60
+
+
+def _tarefa_benigna(nome: str, res: int) -> str | None:
+    """Detalhe para um resultado de tarefa que não é erro de verdade, ou None se for erro."""
+    if res in TAREFA_ENCERRADA_NO_DESLIGAMENTO:
+        return "Encerrada no desligamento do PC."
+    if res == TAREFA_OCUPADA and nome.startswith("Vault "):
+        return "Ficou para a próxima: outro job do vault estava rodando (código 75)."
+    return None
 
 _SEM_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -160,11 +190,33 @@ def chk_http(id_: str, nome: str, url: str, falta: str) -> dict:
         return _item(id_, nome, "falha", falta)
 
 
-def chk_aw(agora: float) -> dict:
+def _boot() -> float:
+    try:
+        return psutil.boot_time()
+    except Exception:
+        return 0.0
+
+
+def chk_ollama(agora: float, boot: float | None = None) -> dict:
+    """Como chk_http, mas sem acusar falha nos primeiros BOOT_GRACA_S depois que o PC ligou."""
+    it = chk_http("ollama", "Ollama", "http://127.0.0.1:11434/api/version",
+                  "Não responde: as notas saem sem enriquecimento.")
+    ligado = agora - (_boot() if boot is None else boot)
+    if it["estado"] != "ok" and 0 <= ligado < BOOT_GRACA_S:
+        return _item("ollama", "Ollama", "ok", f"Subindo (PC ligado há {_idade(ligado)}).")
+    return it
+
+
+def chk_aw(agora: float, boot: float | None = None) -> dict:
     nome = "ActivityWatch"
     try:
         buckets = _get_json("http://127.0.0.1:5600/api/0/buckets/")
     except Exception:
+        # Como o Ollama: no boot o servidor leva uns minutos (15/10 e 24/10, uma checagem só). Desde
+        # que falha entra no registro na hora, isso voltaria a ser ruído.
+        ligado = agora - (_boot() if boot is None else boot)
+        if 0 <= ligado < BOOT_GRACA_S:
+            return _item("aw", nome, "ok", f"Subindo (PC ligado há {_idade(ligado)}).")
         return _item("aw", nome, "falha", "O servidor não responde: o dia do PC não está sendo registrado.")
     janelas = [b for k, b in buckets.items() if k.startswith("aw-watcher-window_")]
     ultimos = [t for t in (_iso_para_ts(b.get("last_updated") or "") for b in janelas) if t]
@@ -193,8 +245,13 @@ def _syncthing_api() -> tuple[str, str, dict[str, str]] | None:
     return f"{esquema}://{endereco}", chave, aparelhos
 
 
-def chk_syncthing(procs, agora: float) -> list[dict]:
+def chk_syncthing(procs, agora: float, boot: float | None = None) -> list[dict]:
+    """O Syncthing do PC e cada aparelho. Logo depois do boot (SYNC_BOOT_GRACA_S), não ter conectado é
+    esperar: o PC desligado não conta (o caso de 24/10 10:02 a 25/10 15:58 dava "sem conectar há 30 h"
+    no boot). Passada a graça, não ter aparecido desde o boot é atenção; visto depois do boot, atenção
+    com mais de 24 h; e qualquer último contato acima de SYNC_CELULAR_SUMIDO_S é atenção, boot ou não."""
     nome = "Syncthing"
+    boot = _boot() if boot is None else boot
     if not instancias(r"syncthing\.exe", procs):
         return [_item("syncthing", nome, "falha", "Não está rodando: o áudio do celular não chega ao PC.")]
     api = _syncthing_api()
@@ -218,13 +275,22 @@ def chk_syncthing(procs, agora: float) -> list[dict]:
             itens.append(_item(f"sync:{rotulo}", f"Syncthing: {rotulo}", "ok", "Conectado."))
             continue
         visto = _iso_para_ts((stats.get(dev) or {}).get("lastSeen") or "")
+        id_, nome_dev = f"sync:{rotulo}", f"Syncthing: {rotulo}"
         if visto is None or visto < 86400 * 365:  # "1970-01-01": nunca visto
-            itens.append(_item(f"sync:{rotulo}", f"Syncthing: {rotulo}", "atencao", "Nunca conectou."))
-        elif agora - visto > SYNC_CELULAR_MAX_S:
-            itens.append(_item(f"sync:{rotulo}", f"Syncthing: {rotulo}", "atencao",
-                               f"Sem conectar há {_idade(agora - visto)}."))
+            itens.append(_item(id_, nome_dev, "atencao", "Nunca conectou."))
+            continue
+        ligado, sem = agora - boot, agora - visto
+        if sem > SYNC_CELULAR_SUMIDO_S:  # com o PC ligado ou não, desde o boot ou não
+            itens.append(_item(id_, nome_dev, "atencao", f"Sem conectar há {_idade(sem)}."))
+        elif visto < boot and 0 <= ligado < SYNC_BOOT_GRACA_S:
+            itens.append(_item(id_, nome_dev, "ok", f"PC ligado há {_idade(ligado)}; esperando o celular."))
+        elif visto < boot:
+            itens.append(_item(id_, nome_dev, "atencao", f"Não apareceu desde que o PC ligou, há {_idade(ligado)};"
+                                                         f" visto pela última vez há {_idade(sem)}."))
+        elif sem > SYNC_CELULAR_MAX_S:
+            itens.append(_item(id_, nome_dev, "atencao", f"Sem conectar há {_idade(sem)}."))
         else:
-            itens.append(_item(f"sync:{rotulo}", f"Syncthing: {rotulo}", "ok", f"Visto há {_idade(agora - visto)}."))
+            itens.append(_item(id_, nome_dev, "ok", f"Visto há {_idade(sem)}."))
     return itens
 
 
@@ -269,7 +335,10 @@ def chk_tarefas(lista: list[dict] | None, agora: float) -> list[dict]:
         ultima = _iso_para_ts(t.get("ultima") or "")
         proxima = _iso_para_ts(t.get("proxima") or "")
         quando = f" ({datetime.fromtimestamp(ultima):%d/%m %H:%M})" if ultima else ""
-        if res not in TAREFA_OK:
+        benigna = _tarefa_benigna(nome, res)
+        if benigna:
+            itens.append(_item(f"tarefa:{nome}", nome, "ok", benigna[:-1] + quando + "."))
+        elif res not in TAREFA_OK:
             itens.append(_item(f"tarefa:{nome}", nome, "atencao", f"Terminou com código {res}{quando}."))
         elif proxima and agora - proxima > ATRASO_TAREFA_S and t.get("estado") != "Running":
             itens.append(_item(f"tarefa:{nome}", nome, "atencao",
@@ -297,8 +366,7 @@ def checar(agora: float | None = None, lista=_BUSCAR) -> list[dict]:
         chk_drenador(procs),
         chk_http("assistente", "Assistente (WhatsApp)", "http://127.0.0.1:8765/api/fila",
                  "Não responde: a fila do WhatsApp não chega ao celular."),
-        chk_http("ollama", "Ollama", "http://127.0.0.1:11434/api/version",
-                 "Não responde: as notas saem sem enriquecimento."),
+        chk_ollama(agora),
         chk_aw(agora),
         *chk_syncthing(procs, agora),
         chk_disco(),
@@ -327,17 +395,29 @@ def registrar_mudancas(itens: list[dict], tarefas_lista: list[dict] | None, agor
     novos = {}
     for it in itens:
         velho = estados.get(it["id"])
-        if velho and velho.get("estado") == it["estado"]:
-            it["desde"] = velho.get("desde", int(agora))
-        else:
-            it["desde"] = int(agora)
-            if velho and it["estado"] != "ok":
-                eventos.registrar("vigia", f"{it['nome']}: {it['detalhe'] or 'com problema'}", it["estado"], agora)
-            elif velho and it["estado"] == "ok":
+        # `reg`: o problema deste estado já está no registro. Estado antigo sem o campo conta como
+        # registrado (era a regra de antes), para a volta ao normal dele ainda aparecer.
+        velho_reg = bool(velho) and velho.get("estado") != "ok" and velho.get("reg", True)
+        mesmo = bool(velho) and velho.get("estado") == it["estado"]
+        it["desde"] = velho.get("desde", int(agora)) if mesmo else int(agora)
+        reg, n = False, 1
+        if it["estado"] == "ok":
+            if velho_reg:
                 eventos.registrar("vigia", f"{it['nome']}: voltou ao normal.", "info", agora)
-            elif not velho and it["estado"] != "ok":
+        else:
+            # `n` = checagens ruins seguidas, de qualquer estado ruim (atenção ↔ falha não zera).
+            # Falha entra na hora; atenção, na CONFIRMA_CHECAGENS-ésima ruim seguida; troca de um
+            # problema já registrado por outro (atenção ↔ falha), também na hora.
+            ruim_antes = bool(velho) and velho.get("estado") != "ok"
+            n = int(velho.get("n", CONFIRMA_CHECAGENS)) + 1 if ruim_antes else 1
+            if mesmo and velho_reg:
+                reg = True  # já está no registro
+            elif it["estado"] == "falha" or velho_reg or n >= CONFIRMA_CHECAGENS:
                 eventos.registrar("vigia", f"{it['nome']}: {it['detalhe'] or 'com problema'}", it["estado"], agora)
+                reg = True
         novos[it["id"]] = {"estado": it["estado"], "desde": it["desde"]}
+        if it["estado"] != "ok":
+            novos[it["id"]].update(reg=reg, n=min(n, 99))
     if tarefas_lista is not None:
         for t in tarefas_lista:
             nome, ultima = t.get("nome"), t.get("ultima")
@@ -345,6 +425,14 @@ def registrar_mudancas(itens: list[dict], tarefas_lista: list[dict] | None, agor
                 continue
             if nome in execucoes and execucoes[nome] != ultima:
                 res = _resultado(int(t.get("resultado") or 0))
+                if res in TAREFA_ENCERRADA_NO_DESLIGAMENTO:  # não rodou nada: o PC desligou
+                    execucoes[nome] = ultima
+                    continue
+                benigna = _tarefa_benigna(nome, res)
+                if benigna:  # 75 no boot: fica no registro como informação, não como atenção
+                    eventos.registrar("tarefas", f"{nome}: {benigna}", "info", _iso_para_ts(ultima) or agora)
+                    execucoes[nome] = ultima
+                    continue
                 ok = res in TAREFA_OK
                 ini, prox = _iso_para_ts(ultima), _iso_para_ts(t.get("proxima") or "")
                 frequente = ini is not None and prox is not None and prox - ini < TAREFA_FREQUENTE_S

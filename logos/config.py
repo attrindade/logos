@@ -109,6 +109,14 @@ WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE") or _user_cfg.get("whisp
 WHISPER_CPU_THREADS = int(os.getenv("WHISPER_CPU_THREADS") or _user_cfg.get("whisper_cpu_threads", 6))
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE") or _user_cfg.get("whisper_language", "pt")
 WHISPER_VAD_FILTER = bool(os.getenv("WHISPER_VAD_FILTER") or _user_cfg.get("whisper_vad_filter", True))
+# Rodada de 25/10/2026, desligados de fábrica (ligar só depois de medir no conjunto de prova):
+# N5 = filtro de alucinação (hallucination_silence_threshold + frases que o Whisper inventa no
+# silêncio); N1 = vocabulário (initial_prompt e hotwords de vocabulario.txt + org/people + work/active).
+WHISPER_ANTI_ALUCINACAO = bool(_user_cfg.get("whisper_anti_alucinacao", False))
+WHISPER_VOCABULARIO = bool(_user_cfg.get("whisper_vocabulario", False))
+# Coletor de indícios "parece feito" (`logos/indicios.py`, spec K §1.3): desligado até ele decidir
+# (pergunta 2 do plano de 25/10/2026). Mesmo ligado, só age com a Semana nova (`recursos: propostas`).
+INDICIOS_LIGADO = bool(_user_cfg.get("indicios_ligado", False))
 
 # ---------------------------------------------------------
 # LLM (Ollama Local)

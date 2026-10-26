@@ -308,6 +308,23 @@ def test_diario_curto_leva_escalas_ao_formulario_e_pergunta_a_cada_resposta(tmp_
     assert "Humor 4" not in json.dumps(m["mensagens"], ensure_ascii=False)
 
 
+def test_n_a12_diario_antigo_com_resposta_4_ainda_ganha_titulo(tmp_path, monkeypatch):
+    # O app pergunta só as 3 primeiras desde 10/2026; um Diário antigo com a 4ª continua com título no PC.
+    from logos import cofre
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    chave = cofre.carregar_ou_criar()
+    pub = cofre.publica_b64(chave)
+    parte = {"id": "d4", "ordem": 4, "tipo": "cifrada", "criada_em": "2026-10-14T21:04:00",
+             "audio": json.dumps(cofre.selar(json.dumps({"tipo": "texto", "texto": "às 9h, o relatório",
+                                                          "pergunta": 4}).encode(), "d4", pub))}
+    abertas = organiza.abrir_partes(dict(_captura("diario"), id="diario-antigo-4", partes=[parte]), None, chave)
+    m = organiza.manifest_de(dict(abertas, tipo="diario"), {})
+    assert [x.get("pergunta") for x in m["mensagens"]] == [4]
+    assert len(m["perguntas"]) == 4 and m["perguntas"][3].startswith("Amanhã, a primeira coisa")
+    texto = pipeline._agrupar(["às 9h, o relatório"], [4], "diario", "###", m["perguntas"])
+    assert texto == "### " + organiza.PERGUNTAS_DIARIO[3] + "\n\nàs 9h, o relatório"
+
+
 def test_drenador_antigo_le_as_escalas_como_texto():
     # O envelope das escalas tem "texto": quem não conhece "escalas" ainda entrega algo legível.
     m = organiza.manifest_de(dict(_captura("diario"), partes=[
@@ -353,3 +370,91 @@ def test_diario_que_nao_abre_sai_da_janela_das_pendentes(tmp_path, monkeypatch):
     monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
     organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json")
     assert urls[0].endswith("/pendentes?pular=diario-ruim-0001")
+
+
+def test_nota_ilegivel_vira_falha_definitiva_com_um_evento_so(tmp_path, monkeypatch):
+    """A captura de 16/10/2026 (91981c56): partes que não abrem voltavam a cada minuto para sempre,
+    sem aviso. Agora: N tentativas, depois sai da janela (também após reiniciar) e avisa uma vez."""
+    from logos import eventos
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
+    ilegivel = dict(_captura(), id="91981c56-aaaa-bbbb-cccc-000000000001", aberta_em="2026-10-16T06:10:05",
+                    partes=[{"id": "p9", "ordem": 0, "tipo": "voz", "mime": "audio/mp4"}])  # voz sem áudio
+    pedidos = []
+
+    def falso(metodo, url, key, corpo=None):
+        pedidos.append((metodo, url, corpo))
+        if "/pendentes" in url:
+            pulados = url.split("pular=", 1)[1].split(",") if "pular=" in url else []
+            return {"capturas": [] if ilegivel["id"] in pulados else [ilegivel]}
+        return {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    for _ in range(organiza.TENTATIVAS_ILEGIVEL + 5):
+        assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json") == (0, 0)
+
+    pegando = [c for m, u, c in pedidos if c and c.get("estado") == "pegando"]
+    assert len(pegando) == organiza.TENTATIVAS_ILEGIVEL  # depois disso nem pede mais
+    falhas = [e for e in eventos.ultimos() if e["nivel"] == "falha"]
+    assert len(falhas) == 1 and falhas[0]["origem"] == "organiza"
+    assert "16/10 06:10" in falhas[0]["texto"] and "91981c56" in falhas[0]["texto"]
+    # Nada foi apagado nem marcado como nota na nuvem.
+    assert not [c for m, u, c in pedidos if c and c.get("estado") == "nota"]
+    assert not (tmp_path / "Inbox").exists() or not list((tmp_path / "Inbox").iterdir())
+
+    # Drenador reiniciado: a memória some, o arquivo de falhas não. Continua fora e sem novo evento.
+    organiza._FALHARAM.clear()
+    organiza._TENTATIVAS.clear()
+    pedidos.clear()
+    organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json")
+    assert ilegivel["id"] in pedidos[0][1]  # vai no ?pular=
+    assert not [c for m, u, c in pedidos if c and c.get("estado") == "pegando"]
+    assert len([e for e in eventos.ultimos() if e["nivel"] == "falha"]) == 1
+
+
+def test_falha_definitiva_de_diario_nao_leva_conteudo(tmp_path, monkeypatch):
+    from logos import eventos
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    c = dict(_captura("diario"), id="d1a2b3c4-0000")
+    organiza._TENTATIVAS[c["id"]] = 3
+    organiza._falha_definitiva(c, "anotação d1a2b3c4-0000 sem conteúdo", diario=True)
+    texto = eventos.ultimos()[0]["texto"]
+    assert texto.startswith("Um Diário do celular de 14/10 01:25") and "comprar fita" not in texto
+    assert "d1a2b3c4-0000" in organiza._ler_falhas()
+
+
+def test_pular_manda_as_definitivas_primeiro(tmp_path, monkeypatch):
+    # Revisão de 25/10, B1: com mais de 50, o corte alfabético deixava uma definitiva de fora.
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
+    p = organiza._falhas_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"zz-definitiva-01": {"nome": "x"}}), encoding="utf-8")
+    organiza._FALHARAM.update(f"aa-temporaria-{n:02d}" for n in range(60))
+    urls = []
+    monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: (urls.append(u), {"capturas": []})[1])
+    organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json")
+    pulados = urls[0].split("pular=", 1)[1].split(",")
+    assert pulados[0] == "zz-definitiva-01" and len(pulados) == organiza.PULAR_MAX
+
+
+def test_resposta_que_nao_e_json_nao_vira_falha_definitiva(tmp_path, monkeypatch):
+    # Uma página de erro no pedido da parte (json.loads levanta) é rede, não nota ilegível.
+    from logos import eventos
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
+    c = dict(_captura(), partes=[{"id": "p9", "ordem": 0, "tipo": "voz", "mime": "audio/mp4", "tem_audio": True}])
+
+    def falso(metodo, url, key, corpo=None):
+        if "/pendentes" in url:
+            return {"capturas": [] if c["id"] in url else [c]}
+        if "/partes" in url:
+            raise json.JSONDecodeError("Expecting value", "<html>", 0)
+        return {"ok": True}
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    for _ in range(organiza.TENTATIVAS_ILEGIVEL + 3):
+        organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json")
+    assert organiza._ler_falhas() == {}
+    assert not [e for e in eventos.ultimos() if e["nivel"] == "falha"]
+    assert c["id"] in organiza._FALHARAM  # 5 temporárias: fora da janela só até reiniciar

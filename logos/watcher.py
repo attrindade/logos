@@ -112,7 +112,11 @@ def _wait_for_bundle(path: Path, timeout_s: float | None = None) -> bool:
 
 def expire_archive(ledger: Ledger) -> None:
     """Apaga áudio do Archive com mais de ARCHIVE_RETENTION_DAYS. A nota e o transcrito
-    são preservados; a entrada do ledger NUNCA é apagada."""
+    são preservados; a entrada do ledger NUNCA é apagada.
+
+    O original continua na Inbox (pasta só-recebe do Syncthing; este processo nunca mexe nela),
+    então a varredura volta a vê-lo depois daqui: é `Ledger.is_processed` aceitar ARCHIVE_EXPIRED
+    que impede a nota refeita (laço de 23 a 25/10/2026)."""
     cutoff = datetime.now() - timedelta(days=config.ARCHIVE_RETENTION_DAYS)
     for entry in ledger.entries_for_expiry(cutoff):
         archive_path = Path(entry.archive_path)

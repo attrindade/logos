@@ -9,8 +9,17 @@ e a hora de agora. A resposta volta como texto curto, frases de mudança e opera
 
     novo → pensando → pronta (o celular aceita ou não) | aplicada (fechamento) | falha
 
-No fechamento, "cortar" é decisão dele e vira operação aqui, sem passar pelo Claude; o Claude
-só acha lugar para o que vai para amanhã ou outro dia e refaz o resto da semana se precisar.
+No fechamento, "cortar" e "guardar" (Próx. semana) são decisão dele e viram operação aqui, sem
+passar pelo Claude; o Claude só acha lugar para o que vai para amanhã ou outro dia e refaz o
+resto da semana se precisar.
+
+Dia lógico (desde 25/10/2026): o dia vira às 4h (`dia.dia_logico`, `virada_do_dia_h`), como no
+Planeja e no Organiza. À 1h30 de quinta ainda é quarta: "hoje" é quarta, e o "amanhã" de um
+fechamento é o `para` que o celular mandou ou, em fala antiga sem ele, o dia seguinte ao da fala.
+
+API antiga e nova: a Semana nova manda `recursos` em `/api/semana`. Sem `recursos` (ou sem um
+item dele), o comportamento é o de antes: sem `guardar` ("Próx. semana" fica sem decisão), sem
+`resumo` e com a ordem de corte lida do index.html.
 
 Fica de fora: nada do vault entra no prompt, e o Claude roda sem ferramentas (`--tools ""`),
 sem as configurações do usuário e com um prompt de sistema próprio, curto.
@@ -26,11 +35,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import config, organiza
+from .dia import dia_logico
 
 logger = logging.getLogger(__name__)
 
@@ -41,28 +51,51 @@ LIMITE_CLAUDE_S = 300
 INDEX_SEMANA = Path("C:/Workspace/repo-att/semana/site/index.html")
 NOMES = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
 
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "resposta": {"type": "string", "description": "2 a 4 frases para ele, em português"},
-        "mudancas": {"type": "array", "items": {"type": "string"}, "description": "uma frase curta por mudança"},
-        "ops": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "op": {"type": "string", "enum": ["mover", "horario", "novo", "tirar", "cortar"]},
-                    "tarefa": {"type": "string"}, "dia": {"type": "string"}, "bloco": {"type": "string"},
-                    "i": {"type": "string"}, "f": {"type": "string"}, "para": {"type": "string"},
-                    "k": {"type": "string"}, "nome": {"type": "string"},
-                    "tarefas": {"type": "array", "items": {"type": "string"}},
+OPS_CLAUDE = ["mover", "horario", "novo", "tirar", "cortar"]
+RESUMO_MAX = 300  # o limite da op `resumo` na Semana (tema e min, cada um)
+
+
+def tem_recurso(semana: dict, nome: str) -> bool:
+    """A Semana nova anuncia o que sabe fazer em `recursos`; sem a lista, é a API antiga."""
+    return nome in (semana.get("recursos") or [])
+
+
+def ops_do_claude(semana: dict) -> list[str]:
+    return OPS_CLAUDE + (["resumo"] if tem_recurso(semana, "resumo") else [])
+
+
+def schema(semana: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "resposta": {"type": "string", "description": "2 a 4 frases para ele, em português"},
+            "mudancas": {"type": "array", "items": {"type": "string"}, "description": "uma frase curta por mudança"},
+            "ops": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {"type": "string", "enum": ops_do_claude(semana)},
+                        "tarefa": {"type": "string"}, "dia": {"type": "string"}, "bloco": {"type": "string"},
+                        "i": {"type": "string"}, "f": {"type": "string"}, "para": {"type": "string"},
+                        "k": {"type": "string"}, "nome": {"type": "string"},
+                        "tarefas": {"type": "array", "items": {"type": "string"}},
+                        **({"tema": {"type": "string"}, "min": {"type": "string"}}
+                           if tem_recurso(semana, "resumo") else {}),
+                    },
+                    "required": ["op"],
                 },
-                "required": ["op"],
             },
         },
-    },
-    "required": ["resposta", "mudancas", "ops"],
-}
+        "required": ["resposta", "mudancas", "ops"],
+    }
+
+
+SCHEMA = schema({})  # o da API antiga
+
+SISTEMA_RESUMO = """- {"op":"resumo","dia":D,"tema":"...","min":"..."} reescreve o resumo (tema) do dia e, se algo do
+  mínimo saiu ou entrou, o mínimo de texto; mande ao menos um dos dois, até 300 caracteres cada. Use quando
+  suas mudanças deixarem o tema do dia errado (ex.: "Refeito: começa às 10h30; o roteiro foi para quinta.")."""
 
 SISTEMA = """Você é o assistente do dia do André, dentro do app Planeja. Ele planeja a semana em blocos
 de horário no fim de semana e, durante o dia, conta como as coisas estão indo. Você devolve UMA
@@ -75,6 +108,8 @@ Como pensar (Cal Newport: quando o plano quebra, refaça os blocos do resto do d
   passar para outro dia a espremer.
 - Nada no passado: só mexa em blocos que começam depois de agora (hoje) ou em dias que vêm.
 - Tarefa marcada [x] já foi feita: não mova.
+- Bloco marcado "imprevistos" é folga de propósito: é o primeiro lugar para pôr uma tarefa movida.
+- Bloco marcado "hábito" ou "contínua" não é pendência: não mova nem corte por ele.
 - Pedido explícito dele manda. Se faltar informação para decidir, pergunte na resposta e mande ops vazia.
 
 Operações (o bloco é achado pelo dia AAAA-MM-DD e pela hora de início HH:MM, no plano como está):
@@ -89,6 +124,14 @@ Escrita: português do Brasil, "você", frases curtas, sem jargão, sem emoji. "
 você sugere e por quê em 2 a 4 frases. "mudancas" tem uma frase por mudança, como
 "Roteiro das entrevistas vai para quinta, 14h" ou "Sai: contagem de empresas (primeira da ordem de corte)".
 """
+_LINHA_CORTAR = '- {"op":"cortar","tarefa":ID} a tarefa sai da semana; volta na preparação do fim de semana.'
+
+
+def sistema(semana: dict) -> str:
+    """O prompt de sistema: a op `resumo` só entra se a Semana souber aplicá-la."""
+    if tem_recurso(semana, "resumo"):
+        return SISTEMA.replace(_LINHA_CORTAR, _LINHA_CORTAR + "\n" + SISTEMA_RESUMO)
+    return SISTEMA
 
 
 class SemanaRecusou(Exception):
@@ -110,7 +153,7 @@ def _http(metodo: str, caminho: str, key: str, corpo: dict | None = None) -> dic
 
 
 def ordem_de_corte(index: Path = INDEX_SEMANA) -> list[str]:
-    """A lista "Se estourar, sai nesta ordem" da página da semana (ela vive no index.html)."""
+    """A lista "Se estourar, sai nesta ordem" do index.html: a reserva para a API antiga."""
     try:
         html = index.read_text(encoding="utf-8")
     except OSError:
@@ -121,37 +164,79 @@ def ordem_de_corte(index: Path = INDEX_SEMANA) -> list[str]:
     return [re.sub(r"<[^>]+>", "", li).strip() for li in re.findall(r"<li>(.*?)</li>", m.group(1), re.S)]
 
 
+def corte_da_semana(semana: dict) -> list[str]:
+    """A ordem de corte vem de `semana.corte` em `/api/semana` (a Semana nova tira do plano.js);
+    sem ela, do index.html, como antes."""
+    corte = (semana.get("semana") or {}).get("corte")
+    if isinstance(corte, list) and corte:
+        return [str(c).strip() for c in corte if str(c).strip()]
+    return ordem_de_corte()
+
+
 def _dia_nome(iso: str) -> str:
     return NOMES[datetime.fromisoformat(iso).weekday()]
 
 
+def _hoje(agora: datetime) -> str:
+    """O dia lógico de agora (vira às 4h): à 1h30 de quinta ainda é quarta."""
+    return dia_logico(agora).isoformat()
+
+
+def minimo_do_dia(d: dict, checks: dict | None = None) -> str:
+    """O mínimo calculado: os `min` de blocos e tarefas que estão no dia depois dos ajustes (uma
+    tarefa movida leva o `min` junto). Sem nenhum, a reserva é o `min` de texto do dia."""
+    checks = checks or {}
+    rotulos = []
+    for b in d.get("blocos") or []:
+        if b.get("min"):
+            rotulos.append(str(b["min"]))
+        for t in b.get("tarefas") or []:
+            if t.get("min"):
+                rotulos.append(str(t["min"]) + (" (feito)" if checks.get(t["id"]) else ""))
+    return "; ".join(rotulos) if rotulos else str(d.get("min") or "")
+
+
+def _marcas_do_bloco(b: dict) -> str:
+    marcas = [b["tag"]] if b.get("tag") else []
+    marcas += [nome for campo, nome in (("dl", "fixo"), ("opt", "se der"), ("folga", "imprevistos"),
+                                         ("hab", "hábito"), ("cont", "contínua")) if b.get(campo)]
+    if b.get("min"):
+        marcas.append(f"mínimo: {b['min']}")
+    return "".join(f" · {m}" for m in marcas)
+
+
 def plano_em_texto(semana: dict, agora: datetime) -> str:
     """O plano como o Claude lê: dias de hoje em diante inteiros; dos que passaram, só o que ficou."""
-    hoje = agora.strftime("%Y-%m-%d")
+    hoje = _hoje(agora)
     checks = semana.get("checks") or {}
     linhas = []
     for d in semana.get("dias", []):
         passado = d["id"] < hoje
         blocos = d["blocos"]
-        if passado:
-            blocos = [b for b in blocos if any(not checks.get(t["id"]) for t in b.get("tarefas") or [])]
+        if passado:  # hábito e contínua nunca são "o que ficou"
+            blocos = [b for b in blocos if not b.get("hab") and not b.get("cont")
+                      and any(not checks.get(t["id"]) for t in b.get("tarefas") or [])]
             if not blocos:
                 continue
         cab = f"## {d['id']} {_dia_nome(d['id'])}" + (" (já passou: só o que ficou sem marcar)" if passado else "")
         linhas.append(cab)
-        if not passado and d.get("min"):
-            linhas.append(f"Mínimo do dia: {d['min']}")
+        minimo = "" if passado else minimo_do_dia(d, checks)
+        if minimo:
+            linhas.append(f"Mínimo do dia: {minimo}")
         for b in blocos:
-            extra = "".join([f" · {b['tag']}" if b.get("tag") else "", " · se der" if b.get("opt") else ""])
-            linhas.append(f"{b['i']}–{b['f']} [{b['k']}] {b['nome']}{extra}")
+            linhas.append(f"{b['i']}–{b['f']} [{b['k']}] {b['nome']}{_marcas_do_bloco(b)}")
             for t in b.get("tarefas") or []:
                 if passado and checks.get(t["id"]):
                     continue
-                linhas.append(f"    - [{'x' if checks.get(t['id']) else ' '}] {t['id']} :: {t['t']}")
+                marca = f" (mínimo: {t['min']})" if t.get("min") else ""
+                linhas.append(f"    - [{'x' if checks.get(t['id']) else ' '}] {t['id']} :: {t['t']}{marca}")
         linhas.append("")
     cortadas = semana.get("cortadas") or []
     if cortadas:
         linhas.append("Já cortado esta semana: " + "; ".join(t["t"] for t in cortadas))
+    guardadas = semana.get("guardadas") or []
+    if guardadas:
+        linhas.append("Guardado para o fim de semana (não é pendência): " + "; ".join(t["t"] for t in guardadas))
     return "\n".join(linhas)
 
 
@@ -166,11 +251,51 @@ def _conversa_de_hoje(conversa: list[dict], hoje: str, atual: str) -> str:
     return "\n".join(linhas) or "(nada ainda)"
 
 
+def _linha_agora(agora: datetime) -> str:
+    relogio = agora.strftime("%Y-%m-%d")
+    hoje = _hoje(agora)
+    base = f"Agora: {_dia_nome(relogio)} {relogio}, {agora.strftime('%H:%M')} (horário de Brasília)."
+    if hoje == relogio:
+        return base
+    return base + f" O dia dele vira às 4h: para o plano, hoje ainda é {_dia_nome(hoje)} {hoje}."
+
+
+def _amanha_da_fala(fala: dict, agora: datetime) -> str:
+    """O "amanhã" de uma fala antiga, sem `para`: o dia seguinte ao da fala, não ao relógio.
+    O Planeja antigo manda em `dia` a data do relógio: num fechamento à 1h30 de quinta, `dia` é
+    quinta, mas o dia lógico (vira às 4h) ainda é quarta. Vale o menor dos dois (revisão, B7)."""
+    try:
+        base = date.fromisoformat(str(fala.get("dia") or ""))
+    except ValueError:
+        base = dia_logico(agora)
+    try:
+        criada = datetime.fromisoformat(str(fala.get("criada") or "").replace("Z", "+00:00"))
+        if criada.tzinfo is not None:
+            base = min(base, dia_logico(criada.astimezone(FUSO)))
+    except ValueError:
+        pass
+    return (base + timedelta(days=1)).isoformat()
+
+
+def _destino_em_texto(x: dict, fala: dict, agora: datetime) -> str:
+    para = x.get("para")
+    try:
+        para = date.fromisoformat(str(para)).isoformat() if para else None
+    except ValueError:
+        para = None
+    if x.get("destino") == "amanha":
+        alvo = para or _amanha_da_fala(fala, agora)
+        return f"para {alvo} ({_dia_nome(alvo)}, o próximo dia de trabalho)"
+    if para:
+        return f"para {para} ({_dia_nome(para)}, o dia que ele escolheu)"
+    return "outro dia desta semana (você escolhe)"
+
+
 def montar_prompt(fala: dict, semana: dict, conversa: list[dict], remarcar: list[dict],
                   corte: list[str], agora: datetime) -> str:
-    hoje = agora.strftime("%Y-%m-%d")
+    hoje = _hoje(agora)
     partes = [
-        f"Agora: {_dia_nome(hoje)} {hoje}, {agora.strftime('%H:%M')} (horário de Brasília).",
+        _linha_agora(agora),
         "",
         "# Plano da semana (id da tarefa :: texto; [x] = feita)",
         plano_em_texto(semana, agora),
@@ -186,15 +311,33 @@ def montar_prompt(fala: dict, semana: dict, conversa: list[dict], remarcar: list
     ]
     if fala["tipo"] == "fechamento":
         ctx = fala.get("contexto") or {}
-        decisoes = [x for x in ctx.get("decisoes") or [] if x.get("destino") in ("amanha", "outro")]
-        cortadas = [x["tarefa"] for x in ctx.get("decisoes") or [] if x.get("destino") == "cortar"]
+        todas = [x for x in ctx.get("decisoes") or [] if isinstance(x, dict) and x.get("tarefa")]
+        decisoes = [x for x in todas if x.get("destino") in ("amanha", "outro")]
+        guarda = tem_recurso(semana, "guardar")
+        saem = [x["tarefa"] for x in todas if x.get("destino") == "cortar" or (guarda and x.get("destino") == "guardar")]
         partes += [
             "# Fechamento do dia",
-            "Ele fechou o dia e decidiu o destino de cada pendência. Estas ele cortou e já saem antes das"
-            " suas operações (não use estes ids): " + (", ".join(cortadas) or "nenhuma") + ".",
-            "Ache lugar para estas, no dia pedido, e refaça o amanhã e o resto da semana só se precisar:",
-            "\n".join(f"- {x['tarefa']} → {'amanhã' if x['destino'] == 'amanha' else 'outro dia desta semana (você escolhe)'}"
-                      for x in decisoes) or "(nenhuma para mover)",
+            "Ele fechou o dia e decidiu o destino de cada pendência. Estas ele cortou ou guardou para a"
+            " semana que vem e já saem antes das suas operações (não use estes ids): "
+            + (", ".join(saem) or "nenhuma") + ".",
+        ]
+        ficam = [x["tarefa"] for x in todas if x.get("destino") == "guardar" and not guarda]
+        if ficam:  # API antiga: a Semana não guarda, e cortar seria decidir por ele (revisão, B8)
+            partes.append("Estas ele quis guardar para a semana que vem, mas a Semana ainda não sabe guardar:"
+                          " ficam onde estão, sem decisão (não use estes ids nem diga que foram para a"
+                          " semana que vem): " + ", ".join(ficam) + ".")
+        partes += [
+            "Ache lugar para estas, no dia pedido, e refaça esse dia e o resto da semana só se precisar:",
+            "\n".join(f"- {x['tarefa']} → {_destino_em_texto(x, fala, agora)}" for x in decisoes)
+            or "(nenhuma para mover)",
+        ]
+        primeira = str(ctx.get("primeira") or "").strip()[:300]
+        if primeira:
+            partes.append(f"Ele quer começar o próximo dia de trabalho por: {primeira}; ponha isso no primeiro"
+                          " bloco de trabalho desse dia.")
+        if tem_recurso(semana, "resumo"):
+            partes.append("Se o próximo dia mudou, reescreva o tema dele com a operação resumo.")
+        partes += [
             f"O que ele disse sobre o dia: {fala['texto'] or '(nada)'}",
             "A resposta é o que ele lê amanhã cedo: diga como ficou o amanhã em 2 a 3 frases.",
         ]
@@ -217,14 +360,14 @@ def _claude_exe() -> str:
     raise RuntimeError("claude.exe não encontrado")
 
 
-def rodar_claude(prompt: str) -> dict:
+def rodar_claude(prompt: str, sistema_: str = SISTEMA, schema_: dict | None = None) -> dict:
     """Uma chamada sem tela, sem ferramentas e sem as configurações do usuário. Devolve o JSON."""
     pasta = config.STATE_DIR / "planeja"
     pasta.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(
         [_claude_exe(), "-p", "--model", MODELO, "--tools", "", "--setting-sources", "",
          "--strict-mcp-config", "--no-session-persistence", "--output-format", "json",
-         "--system-prompt", SISTEMA, "--json-schema", json.dumps(SCHEMA)],
+         "--system-prompt", sistema_, "--json-schema", json.dumps(schema_ or SCHEMA)],
         input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=pasta,
         timeout=LIMITE_CLAUDE_S, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
@@ -237,19 +380,44 @@ def rodar_claude(prompt: str) -> dict:
     return saida["structured_output"]
 
 
-def _ops_de_corte(fala: dict) -> list[dict]:
+FRASE_CORTAR = "Sai da semana: "
+FRASE_GUARDAR = "Vai para a semana que vem: "
+
+
+def _ops_de_corte(fala: dict, semana: dict | None = None) -> list[tuple[dict, str]]:
+    """As decisões dele que viram operação sem o Claude, com a frase de cada uma. "Próx. semana"
+    (`destino: guardar`) vira `guardar` se a Semana souber; na API antiga, nada: a tarefa fica onde
+    está, sem decisão. Virar `cortar` com a frase "Vai para a semana que vem" prometia o que a API
+    antiga não faz, e o corte não volta na preparação (revisão de 25/10, B8)."""
     ctx = fala.get("contexto") or {}
-    return [{"op": "cortar", "tarefa": x["tarefa"]} for x in ctx.get("decisoes") or [] if x.get("destino") == "cortar"]
+    guarda = tem_recurso(semana or {}, "guardar")
+    saida = []
+    for x in ctx.get("decisoes") or []:
+        if not isinstance(x, dict) or not x.get("tarefa"):
+            continue
+        if x.get("destino") == "cortar":
+            saida.append(({"op": "cortar", "tarefa": x["tarefa"]}, FRASE_CORTAR))
+        elif x.get("destino") == "guardar" and guarda:
+            saida.append(({"op": "guardar", "tarefa": x["tarefa"]}, FRASE_GUARDAR))
+    return saida
 
 
-def _limpar(s: dict) -> tuple[str, list[str], list[dict]]:
+def _limpar(s: dict, permitidas: list[str] | None = None) -> tuple[str, list[str], list[dict]]:
     resposta = str(s.get("resposta") or "").strip()[:1500]
     mudancas = [str(m).strip()[:200] for m in s.get("mudancas") or [] if str(m).strip()][:20]
     ops = [{k: v for k, v in o.items() if v not in (None, "", [])} for o in s.get("ops") or [] if isinstance(o, dict)]
+    if permitidas is not None:  # a op que a Semana não sabe aplicar não sai daqui (ex.: resumo na API antiga)
+        ops = [o for o in ops if o.get("op") in permitidas]
+    for o in ops:
+        if o.get("op") == "resumo":
+            for campo in ("tema", "min"):
+                if campo in o:
+                    o[campo] = str(o[campo])[:RESUMO_MAX]
+    ops = [o for o in ops if o.get("op") != "resumo" or o.get("tema") or o.get("min")]
     return resposta, mudancas, ops
 
 
-def atender(key: str, fala: dict, claude=rodar_claude, agora: datetime | None = None) -> str:
+def atender(key: str, fala: dict, claude=None, agora: datetime | None = None) -> str:
     """Pensa uma fala e devolve o estado final que a Semana registrou."""
     fid = fala["id"]
     _http("PUT", "/api/dia", key, {"id": fid, "estado": "pensando"})
@@ -257,17 +425,20 @@ def atender(key: str, fala: dict, claude=rodar_claude, agora: datetime | None = 
     semana = _http("GET", "/api/semana", key)
     conversa = _http("GET", "/api/dia", key).get("conversa") or []
     remarcar = _http("GET", "/api/remarcar", key).get("remarcar") or []
-    cortes = _ops_de_corte(fala) if fala["tipo"] == "fechamento" else []
-    prompt = montar_prompt(fala, semana, conversa, remarcar, ordem_de_corte(), agora)
+    if claude is None:
+        sis, esq = sistema(semana), schema(semana)
+        claude = lambda p: rodar_claude(p, sis, esq)  # noqa: E731
+    cortes = _ops_de_corte(fala, semana) if fala["tipo"] == "fechamento" else []
+    prompt = montar_prompt(fala, semana, conversa, remarcar, corte_da_semana(semana), agora)
     erro = None
     for tentativa in range(2):
         p = prompt if erro is None else (
             prompt + f"\n\n# A sugestão anterior não se aplicou\nA página recusou as operações: {erro}\n"
                      "Corrija (ids e horários têm de existir no plano acima) e devolva de novo.")
-        resposta, mudancas, ops = _limpar(claude(p))
+        resposta, mudancas, ops = _limpar(claude(p), ops_do_claude(semana))
         corpo = {"id": fid, "estado": "pronta", "resposta": resposta,
-                 "mudancas": [f"Sai da semana: {_texto_da(semana, o['tarefa'])}" for o in cortes] + mudancas,
-                 "ops": cortes + ops}
+                 "mudancas": [frase + _texto_da(semana, o["tarefa"]) for o, frase in cortes] + mudancas,
+                 "ops": [o for o, _ in cortes] + ops}
         try:
             return _http("PUT", "/api/dia", key, corpo).get("estado", "pronta")
         except SemanaRecusou as e:

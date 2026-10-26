@@ -106,6 +106,79 @@ class Transcription:
     duration_s: float
 
 
+# N5 (rodada de 25/10/2026): frases que o Whisper inventa em pt-BR no silêncio e no ruído (vêm das
+# legendas com que ele foi treinado). Um segmento que é só uma delas sai. Comparação sem acento,
+# caixa e pontuação.
+FRASES_INVENTADAS = (
+    "legendas pela comunidade amara.org", "legenda pela comunidade amara.org", "legendas por amara.org",
+    "obrigado por assistir", "obrigada por assistir", "obrigado pela atenção", "inscreva-se no canal",
+    "inscreva se no canal", "inscreva-se", "não se esqueça de se inscrever no canal", "deixe seu like",
+    "legendas em português", "transcrição e legendas", "se inscreva no canal",
+    "legenda adriana zanotto", "legendas adriana zanotto",  # medido no ruído sem VAD, 25/10/2026
+)
+SILENCIO_ALUCINA_S = 2.0
+VOCAB_MAX_CARACTERES = 600  # ~200 tokens: o initial_prompt do Whisper corta em 224
+
+
+def _norm(s: str) -> str:
+    import re
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize("NFKD", s.lower()) if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9.]+", " ", s).strip(" .")
+
+
+_INVENTADAS = {_norm(f) for f in FRASES_INVENTADAS}
+
+
+def inventada(texto: str) -> bool:
+    return _norm(texto) in _INVENTADAS
+
+
+def vocabulario(vault: Path | None = None, extra: Path | None = None) -> list[str]:
+    """N1: os nomes que o Whisper deve ouvir certo: `vocabulario.txt` (à mão, em DATA_ROOT) primeiro,
+    depois as notas de `org/people/` e `work/active/` (só o nome do arquivo, nunca o conteúdo)."""
+    nomes: list[str] = []
+    extra = extra if extra is not None else config.DATA_ROOT / "vocabulario.txt"
+    try:
+        nomes += [l.strip() for l in extra.read_text(encoding="utf-8").splitlines()
+                  if l.strip() and not l.lstrip().startswith("#")]
+    except OSError:
+        pass
+    vault = vault if vault is not None else config.VAULT_DIR
+    if vault:
+        for pasta in ("org/people", "work/active"):
+            try:
+                # "Governa Clima — Reuniões Log" → "Governa Clima": o satélite não é nome que se fala
+                # (medido: no silêncio, o prompt com "Reuniões Log" fez o Whisper repetir isso).
+                nomes += sorted({p.stem.split(" — ")[0].strip() for p in (Path(vault) / pasta).glob("*.md")})
+            except OSError:
+                continue
+    vistos, saida, total = set(), [], 0
+    for n in nomes:
+        if n.lower() in vistos:
+            continue
+        if total + len(n) + 2 > VOCAB_MAX_CARACTERES:
+            break
+        vistos.add(n.lower())
+        saida.append(n)
+        total += len(n) + 2
+    return saida
+
+
+def opcoes_transcribe() -> dict:
+    """Os argumentos a mais da chamada `transcribe`, conforme as chaves (desligadas de fábrica)."""
+    op: dict = {}
+    if config.WHISPER_ANTI_ALUCINACAO:
+        op["hallucination_silence_threshold"] = SILENCIO_ALUCINA_S
+        op["word_timestamps"] = True  # o hallucination_silence_threshold só age com ele
+    if config.WHISPER_VOCABULARIO:
+        nomes = vocabulario()
+        if nomes:
+            op["initial_prompt"] = "Nomes: " + ", ".join(nomes) + "."
+            op["hotwords"] = " ".join(nomes)
+    return op
+
+
 def transcribe_file(input_path: Path) -> Transcription:
     """Transcreve um arquivo de áudio/vídeo e retorna o texto concatenado e a duração."""
     wav_path = extract_audio_to_wav(input_path)
@@ -116,7 +189,10 @@ def transcribe_file(input_path: Path) -> Transcription:
             beam_size=5,
             language=config.WHISPER_LANGUAGE,
             vad_filter=config.WHISPER_VAD_FILTER,
+            **opcoes_transcribe(),
         )
+        if config.WHISPER_ANTI_ALUCINACAO:
+            segments = [s for s in segments if not inventada(s.text)]
         text = "".join(segment.text for segment in segments)
         return Transcription(text=text.strip(), duration_s=round(float(info.duration), 2))
     finally:

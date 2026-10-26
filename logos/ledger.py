@@ -4,7 +4,8 @@ Chave: nome_do_arquivo + tamanho_em_bytes. Isso garante que um "Revert local cha
 do Syncthing, que reintroduz arquivos antigos, seja reconhecido como já processado.
 
 Entradas nunca são apagadas, nem quando o áudio expira do Archive (§2.3) — remover a
-entrada permitiria retranscrição e nota duplicada caso o arquivo reapareça na Inbox.
+entrada permitiria retranscrição e nota duplicada caso o arquivo reapareça na Inbox. Pelo mesmo
+motivo a expiração (ARCHIVE_EXPIRED) também conta como concluída (`CONCLUIDOS`).
 
 Única exceção: `remove_superseded_failures()` apaga entradas FAILED de versões parciais de um
 arquivo cuja versão maior já foi concluída. Essas chaves (nome + tamanho parcial) nunca
@@ -23,6 +24,13 @@ class State(str):
     ENRICHED = "enriched"
     FAILED = "failed"
     ARCHIVE_EXPIRED = "archive_expired"
+
+
+# Estados em que a nota já existe. ARCHIVE_EXPIRED é ENRICHED depois que o áudio saiu do Archive:
+# o original continua na Inbox (o Syncthing só recebe e o watcher nunca apaga nada lá), então
+# tratá-lo como "não processado" refazia a nota a cada expiração — o laço de 23 a 25/10/2026,
+# que gerou até 4 cópias de cada gravação de agosto.
+CONCLUIDOS = frozenset({State.ENRICHED, State.ARCHIVE_EXPIRED})
 
 
 @dataclass
@@ -87,7 +95,7 @@ class Ledger:
 
     def is_processed_bundle(self, name: str, manifest_hash: str) -> bool:
         entry = self.get_bundle(name, manifest_hash)
-        return entry is not None and entry.state == State.ENRICHED
+        return entry is not None and entry.state in CONCLUIDOS
 
     def find_by_message_id(self, message_id: int) -> Optional[Entry]:
         """Nota gerada a partir da mensagem do Telegram com esse id (a mais recente, se houver várias)."""
@@ -98,10 +106,10 @@ class Ledger:
         return max(matches, key=lambda e: e.updated_at) if matches else None
 
     def is_processed(self, filename: str, size: int) -> bool:
-        """Só ENRICHED conta como totalmente concluído. TRANSCRIBED é intermediário
-        (pode ter caído antes da etapa LLM) e deve ser retomado, não pulado."""
+        """ENRICHED e ARCHIVE_EXPIRED contam como concluídos (CONCLUIDOS). TRANSCRIBED é
+        intermediário (pode ter caído antes da etapa LLM) e deve ser retomado, não pulado."""
         entry = self.get(filename, size)
-        return entry is not None and entry.state == State.ENRICHED
+        return entry is not None and entry.state in CONCLUIDOS
 
     def upsert(self, entry: Entry):
         with self._lock:
@@ -118,7 +126,7 @@ class Ledger:
             return False
         return any(
             v["filename"] == entry.filename
-            and v["state"] in (State.ENRICHED, State.ARCHIVE_EXPIRED)
+            and v["state"] in CONCLUIDOS
             and v["size"] > entry.size
             for v in self._data.values()
         )
