@@ -372,6 +372,8 @@ def relatorio_diario(noites: list[relogio.Dia]) -> Path | None:
         "description": "Sono do relógio contra humor, energia e o sono marcados no /diario.",
         "tags": ["diario", "relogio", "private"],
         "dias": len(pares),
+        # Relatório, não captura: sem isto ele entra na fila do /om-promover e no alerta de higiene.
+        "promoted": "none",
     }
     pasta = diario.caminho_nota(Route.DIARIO, pares[-1][0].data).parent
     return _escrever(pasta / NOTA_DIARIO, fm_nota, corpo)
