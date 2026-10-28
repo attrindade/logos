@@ -16,6 +16,8 @@ VOZ = b"\x00\x00\x00\x18ftypM4A voz de teste"
 def _sem_falhas_antigas():
     organiza._FALHARAM.clear()
     organiza._TENTATIVAS.clear()
+    organiza._PROXIMA.clear()
+    organiza._RECURSOS.update(ate=0.0, lista=None)
 
 def _captura(tipo="ideia", partes=None):
     return {
@@ -374,12 +376,16 @@ def test_diario_que_nao_abre_sai_da_janela_das_pendentes(tmp_path, monkeypatch):
 
 def test_nota_ilegivel_vira_falha_definitiva_com_um_evento_so(tmp_path, monkeypatch):
     """A captura de 16/10/2026 (91981c56): partes que não abrem voltavam a cada minuto para sempre,
-    sem aviso. Agora: N tentativas, depois sai da janela (também após reiniciar) e avisa uma vez."""
+    sem aviso. Agora: N tentativas, espaçadas (28/10: as 3 em 2 min davam falha a um Diário que só
+    estava atrasado), depois sai da janela (também após reiniciar) e avisa uma vez."""
     from logos import eventos
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
+    relogio = [1_800_000_000.0]
+    monkeypatch.setattr(organiza.time, "time", lambda: relogio[0])
+    # A voz diz ter áudio e ele não vem: não é vazia (pode ser a Semana), é ilegível.
     ilegivel = dict(_captura(), id="91981c56-aaaa-bbbb-cccc-000000000001", aberta_em="2026-10-16T06:10:05",
-                    partes=[{"id": "p9", "ordem": 0, "tipo": "voz", "mime": "audio/mp4"}])  # voz sem áudio
+                    partes=[{"id": "p9", "ordem": 0, "tipo": "voz", "mime": "audio/mp4", "tem_audio": 1}])
     pedidos = []
 
     def falso(metodo, url, key, corpo=None):
@@ -387,24 +393,41 @@ def test_nota_ilegivel_vira_falha_definitiva_com_um_evento_so(tmp_path, monkeypa
         if "/pendentes" in url:
             pulados = url.split("pular=", 1)[1].split(",") if "pular=" in url else []
             return {"capturas": [] if ilegivel["id"] in pulados else [ilegivel]}
+        if "/partes?id=" in url:
+            return {"audio": ""}
         return {"ok": True}
 
-    monkeypatch.setattr(organiza, "_pedido", falso)
-    for _ in range(organiza.TENTATIVAS_ILEGIVEL + 5):
-        assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json") == (0, 0)
+    def voltas(n, passo_s=60):
+        for _ in range(n):
+            assert organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json") == (0, 0)
+            relogio[0] += passo_s
 
-    pegando = [c for m, u, c in pedidos if c and c.get("estado") == "pegando"]
-    assert len(pegando) == organiza.TENTATIVAS_ILEGIVEL  # depois disso nem pede mais
+    def pegando():
+        return len([c for m, u, c in pedidos if c and c.get("estado") == "pegando"])
+
+    monkeypatch.setattr(organiza, "_pedido", falso)
+    voltas(5)                       # 1ª tentativa e depois 4 voltas esperando: não tenta de novo
+    assert pegando() == 1
+    relogio[0] += organiza.ESPERA_ILEGIVEL_S[0]
+    voltas(5)                       # 2ª
+    assert pegando() == 2
+    relogio[0] += 3600
+    voltas(3)                       # 1 h depois: ainda esperando as 6 h
+    assert pegando() == 2 and not [e for e in eventos.ultimos() if e["nivel"] == "falha"]
+    relogio[0] += organiza.ESPERA_ILEGIVEL_S[1]
+    voltas(5)                       # 3ª: falha definitiva
+    assert pegando() == organiza.TENTATIVAS_ILEGIVEL  # depois disso nem pede mais
     falhas = [e for e in eventos.ultimos() if e["nivel"] == "falha"]
     assert len(falhas) == 1 and falhas[0]["origem"] == "organiza"
     assert "16/10 06:10" in falhas[0]["texto"] and "91981c56" in falhas[0]["texto"]
     # Nada foi apagado nem marcado como nota na nuvem.
-    assert not [c for m, u, c in pedidos if c and c.get("estado") == "nota"]
+    assert not [c for m, u, c in pedidos if c and c.get("estado") in ("nota", "descartada")]
     assert not (tmp_path / "Inbox").exists() or not list((tmp_path / "Inbox").iterdir())
 
     # Drenador reiniciado: a memória some, o arquivo de falhas não. Continua fora e sem novo evento.
     organiza._FALHARAM.clear()
     organiza._TENTATIVAS.clear()
+    organiza._PROXIMA.clear()
     pedidos.clear()
     organiza.passo("k", tmp_path / "Inbox", tmp_path / "m", tmp_path / "l.json")
     assert ilegivel["id"] in pedidos[0][1]  # vai no ?pular=

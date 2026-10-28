@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -28,7 +29,8 @@ from pathlib import Path
 import yaml
 
 from . import config, cofre, eventos
-from .telegram import MANIFEST, load_secrets, write_manifest
+from .config import load_secrets
+from .pacote import MANIFEST, write_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -211,11 +213,24 @@ def manifest_de(captura: dict, arquivos: dict[str, str]) -> dict:
     return m
 
 
+# Captura sem fala (28/10/2026): nenhum texto, nenhum anexo e menos que isto de voz somada. Um toque
+# no microfone sem falar, ou um Diário aberto e largado (os dois presos de 15 e 28/10 somavam ~470
+# bytes). Não é falha: vira o evento `info` e, com a Semana nova, o estado final "descartada".
+VAZIO_BYTES = 2048
+
+
+class Vazia(Exception):
+    """A captura fechada não tinha nada: nem texto, nem anexo, nem voz que valha (VAZIO_BYTES)."""
+
+
 def entregar(captura: dict, inbox: Path, oficina: Path, audio=None) -> Path:
     """Monta o pacote fora da Inbox e só então o move para lá, inteiro: o watcher nunca vê um
     pacote pela metade. Se já foi entregue (queda entre mover e avisar a Semana), não duplica.
     `audio(id_da_parte)` devolve o base64 da voz (ou da foto e do PDF): a lista de pendentes não traz o áudio (várias
-    vozes juntas estouravam a memória do Worker), então cada uma vem num pedido."""
+    vozes juntas estouravam a memória do Worker), então cada uma vem num pedido.
+
+    Levanta `Vazia` quando não há nada (ver VAZIO_BYTES) e ValueError quando uma parte diz ter
+    áudio e ele não veio (isso não é vazio: pode ser a Semana, e tenta de novo mais tarde)."""
     nome = nome_pacote(captura)
     destino = inbox / nome
     if (destino / MANIFEST).exists():
@@ -226,18 +241,34 @@ def entregar(captura: dict, inbox: Path, oficina: Path, audio=None) -> Path:
     tmp.mkdir(parents=True)
     arquivos: dict[str, str] = {}
     n = 0
+    voz_bytes, anexo, faltou = 0, False, False
     for p in captura.get("partes", []):
         if p.get("tipo") not in ("voz", "arquivo"):
             continue
         b64 = p.get("audio") or (audio(p["id"]) if audio and p.get("tem_audio") else None)
         if not b64:
+            faltou = faltou or bool(p.get("tem_audio"))
             continue
         n += 1
         arq = f"{n:02d}{_EXT.get(p.get('mime') or '', '.m4a' if p.get('tipo') == 'voz' else '.bin')}"
-        (tmp / arq).write_bytes(base64.b64decode(b64))
+        cru = base64.b64decode(b64)
+        (tmp / arq).write_bytes(cru)
         arquivos[p["id"]] = arq
+        if p.get("tipo") == "voz":
+            voz_bytes += len(cru)
+        else:
+            anexo = anexo or bool(cru)
+    texto = any((p.get("texto") or "").strip() for p in captura.get("partes", [])
+                if p.get("tipo") == "texto" and not p.get("escalas"))
+    escalas = any(p.get("escalas") for p in captura.get("partes", []))
+    # Sem parte nenhuma (e fora do Diário) segue o caminho de antes, em `passo`: sai da fila da Semana.
+    tem_partes = bool(captura.get("partes")) or eh_diario(captura)
+    if tem_partes and not (texto or anexo or escalas or faltou) and voz_bytes < VAZIO_BYTES:
+        shutil.rmtree(tmp)
+        raise Vazia(f"anotação {captura['id']} vazia ({voz_bytes} bytes de voz, sem texto nem anexo)")
     m = manifest_de(captura, arquivos)
-    if not m["mensagens"]:
+    # Diário só com as escalas (humor, energia, estresse) é um check-in: o pipeline grava o formulário.
+    if not m["mensagens"] and not m.get("formulario"):
         shutil.rmtree(tmp)
         raise ValueError(f"anotação {captura['id']} sem conteúdo")
     write_manifest(tmp, m)
@@ -279,6 +310,16 @@ def nota_do_pacote(nome: str, ledger_path: Path) -> Path | None:
     return None
 
 
+def descartado_no_ledger(nome: str, ledger_path: Path) -> bool:
+    """O watcher descartou o pacote por não ter fala nem texto (`pipeline._descartar_vazio`)."""
+    try:
+        dados = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return any(isinstance(e, dict) and e.get("filename") == nome and e.get("state") == "descartada"
+               for e in dados.values())
+
+
 def resumo_da_nota(nota: Path) -> tuple[str | None, str | None]:
     """Título e próxima ação do frontmatter da nota, para o app mostrar."""
     try:
@@ -310,10 +351,15 @@ def _sumiu(e: Exception) -> bool:
 # Notas que não abrem (chave trocada) ou falham sempre: pedidas fora da janela das pendentes.
 _FALHARAM: set[str] = set()
 _TENTATIVAS: dict[str, int] = {}
-# Nota com partes de que nada sai (nem texto, nem voz): depois de tantas voltas vira falha
-# definitiva, guardada em disco. Antes ela voltava a cada minuto para sempre, sem aviso nenhum
-# (a de 16/10/2026 repetiu 5.437 vezes no log e ele nunca soube).
+# Nota com partes de que nada sai (uma voz que diz ter áudio e ele não vem, um envelope que abre e
+# não é JSON): depois de tantas tentativas vira falha definitiva, guardada em disco. Antes ela
+# voltava a cada minuto para sempre, sem aviso nenhum (a de 16/10/2026 repetiu 5.437 vezes no log).
 TENTATIVAS_ILEGIVEL = 3
+# Espera antes de cada nova tentativa (28/10/2026): com o laço de 60 s, as 3 voltas davam "falha
+# definitiva" em 2 min (o Diário de 28/10 02:11). A 2ª vem depois de 10 min e a 3ª depois de 6 h
+# (números sugeridos, sem medida): o que é rede ou a Semana atrasada se resolve nesse tempo.
+ESPERA_ILEGIVEL_S = (10 * 60, 6 * 3600)
+_PROXIMA: dict[str, float] = {}  # id → antes desta hora, fica no ?pular=
 
 
 def _falhas_path() -> Path:
@@ -364,6 +410,120 @@ def _falha_definitiva(c: dict, motivo: str, diario: bool) -> None:
     logger.error(f"Organiza: {cid} marcada como falha definitiva ({motivo}); ver {p}")
 
 
+# ---- captura vazia: "descartada" (28/10/2026) ----
+#
+# A Semana nova anuncia o estado final "descartada" em `recursos` (/api/semana). Ele não apaga as
+# partes nem o áudio no D1: fica reversível. Sem o recurso (Semana antiga), a vazia fica guardada em
+# vazias.json, fora da janela das pendentes, sem ERROR, até a Semana anunciar; aí fecha, uma vez só.
+# As entradas "sem conteúdo" de falhas.json (as de antes desta regra) fecham do mesmo jeito, sem abrir
+# nada: "sem conteúdo" era manifesto sem mensagem nenhuma, que pela regra nova é vazia.
+
+RECURSOS_S = 600
+_RECURSOS = {"ate": 0.0, "lista": None}
+
+
+def _vazias_path() -> Path:
+    return config.STATE_DIR / "organiza" / "vazias.json"
+
+
+def _ler_json(p: Path) -> dict:
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _gravar_json(p: Path, d: dict) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(p)
+
+
+def semana_descarta(key: str) -> bool:
+    """A Semana no ar sabe o estado "descartada"? Pergunta no máximo a cada RECURSOS_S, e só quando
+    há o que descartar. Sem resposta, vale a regra "falta recurso = API antiga"."""
+    agora = time.time()
+    if _RECURSOS["lista"] is None or agora >= _RECURSOS["ate"]:
+        try:
+            r = _pedido("GET", URL.replace("/capturas", "/semana"), key).get("recursos")
+            _RECURSOS["lista"] = r if isinstance(r, list) else []
+        except Exception as e:
+            logger.info(f"Organiza: não deu para ler os recursos da Semana ({e}); segue como API antiga")
+            _RECURSOS["lista"] = []
+        _RECURSOS["ate"] = agora + RECURSOS_S
+    return "descartada" in _RECURSOS["lista"]
+
+
+def _quando(nome: str) -> str:
+    m = re.match(r"\d{4}-(\d\d)-(\d\d) (\d\d)-(\d\d)", nome)
+    return f"de {m[2]}/{m[1]} {m[3]}:{m[4]}" if m else "sem data"
+
+
+def _vazia(c: dict, diario: bool) -> None:
+    """Guarda a vazia (fora da janela, também depois de reiniciar) e avisa UMA vez, como `info`.
+    Do Diário vai só data e id, como na falha."""
+    cid = c["id"]
+    vazias = _ler_json(_vazias_path())
+    if cid in vazias:
+        return
+    try:
+        nome = nome_pacote(c)
+    except (KeyError, ValueError, AttributeError):
+        nome = cid
+    vazias[cid] = {"nome": nome, "desde": int(time.time()), "diario": diario}
+    try:
+        _gravar_json(_vazias_path(), vazias)
+    except OSError as e:
+        logger.warning(f"Organiza: não deu para guardar a vazia {cid}: {e}")
+    o_que = "Diário vazio descartado" if diario else "Anotação vazia descartada"
+    eventos.registrar("organiza", f"{o_que}: a do celular {_quando(nome)} não tinha fala nem texto (id {cid[:8]}).",
+                      "info")
+    logger.info(f"Organiza: {cid} vazia, sem fala nem texto; descartada")
+
+
+def _descartadas() -> set[str]:
+    return {i for d in (_ler_json(_vazias_path()), _ler_falhas()) for i, v in d.items()
+            if isinstance(v, dict) and v.get("descartada")}
+
+
+def fechar_descartadas(key: str) -> int:
+    """Manda "descartada" às vazias guardadas e às falhas "sem conteúdo" antigas, uma vez cada, quando
+    a Semana sabe o estado. Devolve quantas fechou nesta volta."""
+    vazias = _ler_json(_vazias_path())
+    falhas = _ler_falhas()
+    abertas = [(vazias, i) for i, v in vazias.items() if isinstance(v, dict) and not v.get("descartada")]
+    abertas += [(falhas, i) for i, v in falhas.items() if isinstance(v, dict) and not v.get("descartada")
+                and "sem conteúdo" in str(v.get("motivo") or "")]
+    if not abertas or not semana_descarta(key):
+        return 0
+    n, antigas = 0, 0
+    for onde, cid in abertas:
+        try:
+            _pedido("PUT", URL + "/estado", key, {"id": cid, "estado": "descartada"})
+        except Exception as e:
+            if not _sumiu(e):
+                logger.warning(f"Organiza: Semana não ouviu o 'descartada' de {cid}: {e}")
+                continue
+        onde[cid]["descartada"] = int(time.time())
+        n += 1
+        antigas += onde is falhas
+    try:
+        if n - antigas:
+            _gravar_json(_vazias_path(), vazias)
+        if antigas:
+            _gravar_json(_falhas_path(), falhas)
+    except OSError as e:
+        logger.warning(f"Organiza: não deu para guardar as descartadas: {e}")
+    if antigas:
+        eventos.registrar("organiza", f"{antigas} anotação(ões) vazia(s) presa(s) desde antes fechada(s) como "
+                                      "descartada(s) na Semana (nada foi apagado lá).", "info")
+    if n:
+        logger.info(f"Organiza: {n} captura(s) vazia(s) fechada(s) como descartada(s)")
+    return n
+
+
 PULAR_MAX = 50  # ids no ?pular= das pendentes
 
 
@@ -387,11 +547,24 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
     def audio(parte_id: str) -> str:
         return _pedido("GET", f"{URL}/partes?id={parte_id}", key).get("audio") or ""
 
-    definitivas = _ler_falhas()
+    fechar_descartadas(key)
+    # Já "descartada" na Semana não volta nas pendentes (só nuvem e pegando): fora do ?pular=, senão
+    # meses de toques sem fala empurrariam as temporárias para fora do corte de 50 (como o B1 de 25/10).
+    def abertas(d: dict) -> dict:
+        return {i: v for i, v in d.items() if not (isinstance(v, dict) and v.get("descartada"))}
+
+    definitivas = abertas(_ler_falhas())
     _FALHARAM.update(definitivas)  # as definitivas valem também depois de reiniciar
+    # As vazias guardadas também: até a Semana anunciar "descartada", elas continuam pendentes lá.
+    vazias = abertas(_ler_json(_vazias_path()))
+    _FALHARAM.update(vazias)
+    _FALHARAM.difference_update(_descartadas())
+    agora = time.time()
+    esperando = {i for i, t in _PROXIMA.items() if t > agora}
     # A rota aceita 50 ids: as definitivas vão primeiro (revisão de 25/10, B1). Por ordem alfabética,
     # uma definitiva podia sair do corte, voltar à janela e ganhar "pegando" a cada minuto.
-    pular = ",".join((sorted(definitivas) + sorted(_FALHARAM - definitivas.keys()))[:PULAR_MAX])
+    fixas = sorted(definitivas) + sorted(vazias.keys() - definitivas.keys())
+    pular = ",".join((fixas + sorted((_FALHARAM | esperando) - set(fixas)))[:PULAR_MAX])
     for c in _pedido("GET", URL + "/pendentes" + (f"?pular={pular}" if pular else ""), key).get("capturas", []):
         diario = eh_diario(c)
         # "pegando" antes de baixar: a partir daqui o celular não reabre nem acrescenta (revisão de
@@ -416,6 +589,11 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
                 chave_cofre = chave_cofre or cofre.carregar_ou_criar()
                 c = dict(c, marcas_abertas=abrir_marcas(c, chave_cofre))
             destino = entregar(c, inbox, oficina, audio)
+        except Vazia:
+            _vazia(c, diario)
+            _FALHARAM.add(c["id"])
+            fechar_descartadas(key)
+            continue
         except cofre.CofreErro as e:
             # Fica na nuvem (o envelope some quando vira "pc"): com a chave certa de volta, abre. Até
             # o drenador reiniciar, não volta a ocupar a janela de 10 das pendentes.
@@ -429,18 +607,26 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
                 _tentar_depois(c, e)
                 continue
             if c.get("partes") or diario:
-                # Tem partes mas nada saiu delas: fica na nuvem para olhar, sem apagar nada lá. Depois
-                # de TENTATIVAS_ILEGIVEL voltas, falha definitiva: sai da janela e avisa uma vez.
-                _TENTATIVAS[c["id"]] = _TENTATIVAS.get(c["id"], 0) + 1
-                logger.warning(f"Organiza: {c.get('id')} sem conteúdo legível, fica na nuvem "
-                               f"(tentativa {_TENTATIVAS[c['id']]}/{TENTATIVAS_ILEGIVEL}): {e}")
-                if _TENTATIVAS[c["id"]] >= TENTATIVAS_ILEGIVEL:
+                # Tem partes mas nada saiu delas: fica na nuvem para olhar, sem apagar nada lá. As
+                # tentativas são espaçadas (ESPERA_ILEGIVEL_S); depois de TENTATIVAS_ILEGIVEL, falha
+                # definitiva: sai da janela e avisa uma vez.
+                n = _TENTATIVAS[c["id"]] = _TENTATIVAS.get(c["id"], 0) + 1
+                if n >= TENTATIVAS_ILEGIVEL:
                     _falha_definitiva(c, str(e), diario)
+                    continue
+                espera = ESPERA_ILEGIVEL_S[min(n, len(ESPERA_ILEGIVEL_S)) - 1]
+                _PROXIMA[c["id"]] = time.time() + espera
+                logger.warning(f"Organiza: {c.get('id')} sem conteúdo legível, fica na nuvem "
+                               f"(tentativa {n}/{TENTATIVAS_ILEGIVEL}, a próxima em {espera // 60} min): {e}")
                 continue
             # Nenhuma parte: sai da fila da Semana, senão dez assim ocupariam a janela para sempre.
-            logger.warning(f"Organiza: {e}")
+            # Com a Semana nova, como "descartada" (não apaga nada); na antiga, como antes.
+            logger.info(f"Organiza: {e}")
+            corpo = {"id": c["id"], "estado": "nota", "titulo": "Sem conteúdo: nada a guardar"}
+            if semana_descarta(key):
+                corpo = {"id": c["id"], "estado": "descartada"}
             try:
-                _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "nota", "titulo": "Sem conteúdo: nada a guardar"})
+                _pedido("PUT", URL + "/estado", key, corpo)
             except Exception as e2:
                 logger.warning(f"Organiza: não deu para tirar {c['id']} da fila: {e2}")
             continue
@@ -459,16 +645,37 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         logger.info(f"Organiza: {destino.name} entregue à Inbox")
         eventos.registrar("organiza", "Diário do celular chegou ao PC." if diario else f"Anotação do celular chegou ao PC ({destino.name}).")
     notas = 0
+    # A caixa (logos/caixa.py): as entregues fora do Diário que ainda não têm decisão.
+    esperando = sum(1 for cid, nome in entregues.items() if not nome.startswith("diario:") and caixa_da(cid) is None)
     for cid, nome in list(entregues.items()):
         diario = nome.startswith("diario:")
         nome = nome.removeprefix("diario:")
+        dec = None if diario else aplicar_caixa(key, cid)
         nota = nota_do_pacote(nome, ledger_path)
         if nota is None:
-            continue
-        # Do Diário não volta nada para a nuvem além de "virou nota": nem título, nem ação.
-        corpo = {"id": cid, "estado": "nota"}
-        if not diario:
-            corpo["titulo"], corpo["proxima"] = resumo_da_nota(nota)
+            if not descartado_no_ledger(nome, ledger_path):
+                continue
+            # Toque sem fala: "descartada" na Semana nova; na antiga, "nota" com o aviso no título
+            # (o áudio já saiu da nuvem no "pc"). Do Diário, nem esse título.
+            if semana_descarta(key):
+                corpo = {"id": cid, "estado": "descartada"}
+            else:
+                corpo = {"id": cid, "estado": "nota"}
+                if not diario:
+                    corpo["titulo"] = "Gravação vazia: nada a guardar"
+        else:
+            if dec and not dec.get("enviado"):
+                # O efeito da caixa não chegou à Semana nesta volta (revisão da onda 2, 28/10): fica em
+                # `entregues` até chegar, senão o app mostraria o destino sem o efeito (a fala do plano,
+                # o complemento ou o recado) e ninguém tentaria de novo.
+                continue
+            # Do Diário não volta nada para a nuvem além de "virou nota": nem título, nem ação.
+            corpo = {"id": cid, "estado": "nota"}
+            if not diario:
+                corpo["titulo"], corpo["proxima"] = resumo_da_nota(nota)
+                if dec:
+                    from . import caixa
+                    corpo["destino"], corpo["entendi"] = dec["destino"], caixa._frase(dec.get("entendi"), caixa.MAX_ENTENDI)
         try:
             _pedido("PUT", URL + "/estado", key, corpo)
         except Exception as e:
@@ -478,7 +685,83 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         del entregues[cid]
         _gravar_entregues(entregues)
         notas += 1
+    linha_da_caixa(key, esperando)
     return novas, notas
+
+
+# ---- a caixa da captura (logos/caixa.py, LOG 9 de 28/10/2026) ----
+
+def caixa_da(cid: str) -> dict | None:
+    if not config.CAIXA_LIGADA:
+        return None
+    from . import caixa
+    return caixa.ler(cid)
+
+
+def aplicar_caixa(key: str, cid: str) -> dict | None:
+    """A decisão do watcher vira efeito (uma vez) e volta à Semana como `pc` com destino e entendi.
+    Se a Semana não ouvir, tenta de novo na próxima volta: o efeito é idempotente."""
+    dec = caixa_da(cid)
+    if dec is None or dec.get("enviado"):
+        return dec
+    from . import caixa
+    try:
+        caixa.aplicar(key, dec, _pedido)
+        caixa.enviar_estado(key, dec, _pedido)
+        logger.info(f"Organiza: caixa de {cid[:8]} aplicada ({dec['destino']})")
+    except Exception as e:
+        logger.warning(f"Organiza: caixa de {cid[:8]} fica para a próxima volta: {e}")
+    return dec
+
+
+def linha_da_caixa(key: str, esperando: int) -> None:
+    """A linha `caixa` de /api/linhas (só números), quando os números mudam."""
+    if not config.CAIXA_LIGADA:
+        return
+    from . import caixa
+    try:
+        if caixa.publicar_linha(key, esperando, _pedido):
+            logger.info("Organiza: linha da caixa atualizada")
+    except Exception as e:
+        logger.warning(f"Organiza: linha da caixa não foi: {e}")
+
+
+# ---- a linha `manha` (LOG 12, 28/10/2026: D3 = (a), o sono vai ao cartão da manhã do Planeja) ----
+
+MANHA_ESPERA_S = 600
+_MANHA = {"proxima": 0.0}
+
+
+def _manha_path() -> Path:
+    return config.STATE_DIR / "organiza" / "manha.json"
+
+
+def manha_ao_celular(key: str, agora=None) -> bool:
+    """Publica `manha: {sono_min}` uma vez por dia, só com a noite de HOJE fechada (`sono.manha_de_hoje`).
+    Uma noite de outro dia nunca sai: o relógio parou em 22/10 e uma noite velha não é a de hoje.
+    Antes de a Semana conhecer a chave (SEM 3), o PUT dá 400: tenta de novo a cada 10 min, em DEBUG."""
+    from . import sono
+    m = sono.manha_de_hoje(agora)
+    if not m or time.time() < _MANHA["proxima"]:
+        return False
+    if _ler_json(_manha_path()).get("dia") == m["dia"]:
+        return False
+    try:
+        _pedido("PUT", URL.replace("/capturas", "/linhas"), key, {"chave": "manha", "dados": {"sono_min": m["sono_min"]}})
+    except urllib.error.HTTPError as e:
+        _MANHA["proxima"] = time.time() + MANHA_ESPERA_S
+        if e.code == 400:
+            logger.debug("Organiza: a Semana ainda não conhece a linha manha (SEM 3); tenta depois")
+        else:
+            logger.warning(f"Organiza: linha manha não foi: {e}")
+        return False
+    except Exception as e:
+        _MANHA["proxima"] = time.time() + MANHA_ESPERA_S
+        logger.warning(f"Organiza: linha manha não foi: {e}")
+        return False
+    _gravar_json(_manha_path(), {"dia": m["dia"]})
+    logger.info("Organiza: linha manha publicada")
+    return True
 
 
 def caminho_chave_existe() -> bool:
@@ -560,12 +843,51 @@ def _pub_valida(pub) -> bool:
         return False
 
 
+FORMATO_LOG = "%(asctime)s %(levelname)s %(message)s"
+
+
+def configurar_log(laco: bool) -> None:
+    """O drenador em laço grava `logs/organiza.log` com rotação e em UTF-8 (28/10/2026: o arquivo
+    crescia sem limite e saía com acento quebrado, "entregue � Inbox", porque vinha do stderr
+    redirecionado pelo Organiza.vbs, na página de código do Windows).
+
+    Com o .vbs antigo (`2>> organiza.log`), o stderr já é esse arquivo e girar não dá (o cmd o mantém
+    aberto): o log continua pelo stderr, agora em UTF-8, e a rotação começa quando o .vbs mandar o
+    stderr para `organiza-stderr.log`. Fora do laço (`--uma-vez`, `--inbox`), só o terminal."""
+    if not laco:
+        logging.basicConfig(level=logging.INFO, format=FORMATO_LOG)
+        return
+    logging.basicConfig(level=logging.INFO, format=FORMATO_LOG, handlers=handlers_do_log(sys.stderr))
+
+
+def handlers_do_log(stderr) -> list[logging.Handler]:
+    from . import diagnostico
+    caminho = config.LOGS_DIR / "organiza.log"
+    if diagnostico.mesmo_arquivo(stderr, caminho):
+        try:
+            stderr.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+        return [logging.StreamHandler(stderr)]
+    handlers: list[logging.Handler] = [diagnostico.arquivo_de_log(caminho)]
+    try:
+        if stderr is not None and stderr.isatty():
+            handlers.append(logging.StreamHandler(stderr))
+    except (AttributeError, ValueError):
+        pass
+    return handlers
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Traz as anotações do app Organiza para a Inbox do Logos.")
     ap.add_argument("--uma-vez", action="store_true", help="uma volta só, para testar")
     ap.add_argument("--inbox", type=Path, default=None, help="outra pasta no lugar da Inbox (testes)")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    laco = args.inbox is None and not args.uma_vez
+    configurar_log(laco)
+    if laco:
+        from . import diagnostico
+        diagnostico.ligar_rastro("drenador")
     key = chave()
     if not key:
         raise SystemExit("Falta a chave da Semana: SEMANA_KEY ou semana_key em state/secrets.yaml.")
@@ -594,6 +916,10 @@ def main() -> None:
             pedidos_do_celular(key)
             vigia_ao_celular(key)
             indicios_ao_celular(key)
+            try:
+                manha_ao_celular(key)
+            except Exception as e:
+                logger.warning(f"Organiza: linha manha: {e}")
             from . import acoes_celular
             if time.time() - ultima_ida >= IDA_S or acoes_celular.ida_pedida() or briefing_novo(ultima_ida):
                 ultima_ida = time.time()
@@ -661,8 +987,10 @@ def ida_ao_celular(key: str) -> None:
     from . import vault_celular  # aqui dentro: vault_celular importa este módulo
     try:
         r = vault_celular.passo(key)
-        if r and (r[0] or r[1]):
-            logger.info(f"Vault no celular: {r[0]} enviada(s), {r[1]} apagada(s)")
+        if r:
+            # "0 enviada(s)" é o normal: só em DEBUG (28/10/2026, eram centenas de linhas no log).
+            logger.log(logging.INFO if (r[0] or r[1]) else logging.DEBUG,
+                       f"Vault no celular: {r[0]} enviada(s), {r[1]} apagada(s)")
     except Exception as e:
         logger.warning(f"Vault no celular: volta falhou: {e}")
 

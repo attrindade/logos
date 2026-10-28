@@ -57,6 +57,8 @@ def _permitida(raiz: Path, f: Path) -> bool:
         return False
     na_lista = any(rel.startswith(r + "/") for r in RECURSIVAS) or any(
         rel.startswith(r + "/") and "/" not in rel[len(r) + 1:] for r in RASAS)
+    if any(rel.startswith(x) for x in config.VAULT_CELULAR_FORA):
+        return False
     return na_lista and f.suffix == ".md" and f.is_file()
 
 
@@ -126,6 +128,9 @@ def passo(key: str, raiz: Path | None = None) -> tuple[int, int] | None:
                 continue
             organiza._pedido("PUT", URL, key, {"id": i, "versao": v, "env": env})
             enviadas += 1
+            # Qual nota foi (28/10/2026: "1 enviada(s)" a cada volta, sem dizer qual). Só o caminho,
+            # e só de nota que a lista deixa sair (nunca o Diário).
+            logger.debug(f"Vault no celular: enviada {rel} ({'nova' if i not in na_nuvem else 'mudou'})")
         except (OSError, UnicodeError, ValueError) as e:  # uma nota ruim não segura as outras
             logger.warning(f"Vault no celular: uma nota ficou de fora ({type(e).__name__})")
     sobra = set(na_nuvem) - vistos

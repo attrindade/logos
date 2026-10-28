@@ -204,6 +204,9 @@ def write_note(
         frontmatter["times"] = times
     if enrichment.get("responde_a"):
         frontmatter["responde_a"] = enrichment["responde_a"]
+    # Para onde a caixa da captura mandou (logos/caixa.py, 28/10/2026); a correção troca só isto.
+    if enrichment.get("destino"):
+        frontmatter["destino"] = enrichment["destino"]
 
     if anexos:
         frontmatter["anexos"] = _attachment_paths(anexos)

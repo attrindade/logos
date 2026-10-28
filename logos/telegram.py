@@ -28,7 +28,6 @@ aberto vira pacote próprio, fechado na hora, com `reply_to`: o pipeline anexa o
 original, achada pelo message_id no ledger.
 """
 import argparse
-import json
 import logging
 import mimetypes
 import os
@@ -43,9 +42,13 @@ from pathlib import Path
 
 import requests
 import urllib3
-import yaml
 
 from . import config, consulta, formulario, jobs
+# Reexportados (28/10/2026): os avisos têm nome próprio (`logos.aviso`), o manifest do pacote também
+# (`logos.pacote`) e os segredos estão em `config`. Quem importava daqui continua funcionando.
+from .aviso import registrar, resumo_do_envio  # noqa: F401
+from .config import load_secrets, save_secrets, secrets_path  # noqa: F401
+from .pacote import MANIFEST, load_manifest, write_manifest  # noqa: F401
 from .triage import TELEGRAM_TAG, _normalize_word
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,6 @@ MAX_PHOTO_BYTES = 10 * 1024 * 1024
 MESSAGE_LIMIT = 4096
 CAPTION_LIMIT = 1024
 PHOTO_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
-MANIFEST = "manifest.json"
 MANIFEST_VERSION = 2  # v2: rota, formulário e `pergunta` por mensagem, todos opcionais
 
 EXIT_OK, EXIT_FAILED, EXIT_NOT_CONFIGURED = 0, 1, 2
@@ -164,28 +166,6 @@ class TelegramError(Exception):
 # ---------------------------------------------------------------------------
 # Segredos (fora do repo): state/secrets.yaml ou LOGOS_TELEGRAM_TOKEN
 # ---------------------------------------------------------------------------
-
-def secrets_path() -> Path:
-    return config.STATE_DIR / "secrets.yaml"
-
-
-def load_secrets() -> dict:
-    try:
-        data = yaml.safe_load(secrets_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def save_secrets(updates: dict) -> None:
-    path = secrets_path()
-    data = load_secrets()
-    data.update(updates)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    os.replace(tmp, path)
-
 
 def get_token() -> str | None:
     return os.getenv("LOGOS_TELEGRAM_TOKEN") or load_secrets().get("telegram_token") or None
@@ -350,21 +330,6 @@ def bundle_name(message: dict) -> str:
 
 def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
-
-
-def load_manifest(directory: Path) -> dict | None:
-    try:
-        data = json.loads((directory / MANIFEST).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def write_manifest(directory: Path, manifest: dict) -> None:
-    """Serialização determinística: o hash do manifest compõe a chave do pacote no ledger."""
-    tmp = directory / f".{MANIFEST}.tmp"
-    tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, directory / MANIFEST)
 
 
 def finalize_bundle(directory: Path, manifest: dict, reason: str) -> Path:
@@ -1122,9 +1087,8 @@ def _chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
 def notify(text: str) -> bool:
     """Aviso de uma linha para o dono. Nunca levanta: um alerta que derruba o pipeline é
     pior que a falha que ele anuncia. Devolve False quando não deu para avisar.
-    Antes de tudo, o aviso entra no registro da aba Logos do Organiza (`eventos.py`)."""
-    from . import eventos
-    eventos.registrar("logos", text, eventos.nivel_de(text))
+    Antes de tudo, o aviso entra no registro da aba Logos do Organiza (`logos.aviso`)."""
+    registrar("logos", text)
     if not BOT_LIGADO:
         return True  # o registro é o canal agora
     token, chat_id = get_token(), get_owner_chat_id()
@@ -1140,13 +1104,10 @@ def notify(text: str) -> bool:
 
 
 def send(text: str | None, file: Path | None) -> int:
-    # Os jobs do vault avisam por aqui (`python -m logos.telegram send`): o aviso entra no registro
-    # da aba Logos do Organiza antes do Telegram. Repetição (3 tentativas) não duplica.
-    from . import eventos
-    resumo = (text or "").strip() or (f"Pronto: {file.name}" if file is not None else "")
-    if file is not None and text:
-        resumo = f"{text.strip()}\n{file.name}"
-    eventos.registrar("jobs", resumo, eventos.nivel_de(resumo))
+    # Os jobs do vault avisam por aqui (`python -m logos.telegram send`, o apelido de
+    # `python -m logos.aviso send`): o aviso entra no registro da aba Logos do Organiza antes do
+    # Telegram, igual ao `aviso.send`. Repetição (3 tentativas) não duplica.
+    registrar("jobs", resumo_do_envio(text, file))
     if not BOT_LIGADO:
         return EXIT_OK  # o registro é o canal agora
     token, chat_id = get_token(), get_owner_chat_id()

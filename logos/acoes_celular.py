@@ -16,6 +16,9 @@ O celular fecha cada ação com a chave do PC (o mesmo cofre do Diário) e põe 
                assistente, watcher, drenador ou logos, só desta lista. Quem reinicia é o
                `C:\\Workspace\\_cli\\servicos.ps1`, solto do drenador e depois de a ação já constar
                como feita, porque reiniciar o drenador mata este laço.
+    caixa_mudar a correção em 1 toque da caixa da captura (28/10/2026, `logos/caixa.py`): desfaz o
+               efeito anterior, aplica o do destino novo e troca o `destino:` da nota. A Semana só
+               aceita o tipo depois de `acoes.js` ganhar `caixa_mudar` em TIPOS (pacote SEM).
 
 Responder a uma nota não passa por aqui: vai como anotação comum, com a nota nas marcas.
 Teste: `python -m logos.acoes_celular --uma-vez`.
@@ -262,6 +265,16 @@ def _executar(key: str, a: dict, chave, raiz: Path) -> tuple[str, str]:
     if tipo == "contatos":
         n = guardar_contatos(dados.get("lista"))
         return "ok", f"{n} pessoa(s) para manter contato."
+    if tipo == "caixa_mudar":
+        # A correção em 1 toque da caixa (logos/caixa.py, LOG 9 de 28/10/2026; CONTRATO-CAIXA §4).
+        from . import caixa
+        cid, novo = str(dados.get("captura_id") or ""), str(dados.get("destino") or "")
+        dec = caixa.ler(cid)
+        nota = organiza.nota_do_pacote(dec["pacote"], config.LEDGER_PATH) if dec and dec.get("pacote") else None
+        ok, frase = caixa.corrigir(key, cid, novo, _pedido, nota)
+        if ok:
+            eventos.registrar("organiza", f"Caixa: anotação {cid[:8]} corrigida pelo celular ({caixa.ROTULOS.get(novo, novo)}).", "info")
+        return ("ok" if ok else "falha"), frase
     if tipo == "servico":
         alvo = str(dados.get("alvo") or "")
         if alvo not in SERVICOS:

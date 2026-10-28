@@ -51,8 +51,12 @@ MEDIA_NOITES = 7
 MIN_PARA_COMPARAR = 3
 # Diferença menor que isto na hora de dormir não vale uma linha.
 HORARIO_RELEVANTE_MIN = 30
-# Depois disto a mensagem da manhã já não serve; o dia seguinte tem a dele.
-ENVIA_ATE_H = 18
+# Até que hora do dia a noite de hoje ainda entra no registro. Era 18 na era do bot (uma mensagem
+# no Telegram às 20h sobre a noite passada não servia). Em 28/10/2026 viu-se que a mensagem NUNCA
+# chegou à aba Logos: o banco do Gadgetbridge chegava ao PC depois das 18h (as notas "Relógio — …" de
+# 12, 13 e 22/10 foram escritas às 21h45, 20h30 e 20h09) e cada banco só é olhado uma vez. O registro
+# não é notificação: a noite de hoje entra a qualquer hora do mesmo dia.
+ENVIA_ATE_H = 24
 FOLGA_APOS_ACORDAR = timedelta(hours=1)
 # Noite mais curta que isto espera o meio-dia: um trecho seguinte maior viraria a noite.
 CONFIRMA_SE_MENOS_DE_MIN = 4 * 60
@@ -407,14 +411,33 @@ def processar(db: Path, vault: Path, agora: datetime, estado: dict,
     relatorio_diario(noites)
 
     dia = historico[-1]
+    rotulo = f"noite de {hoje:%d/%m}"
+    ate = f"amostras até {cob:%d/%m %H:%M}" if cob else "sem amostras"
     if dia.noite is None:
+        # Só datas e horas da cobertura, nada do sono: o log não é lugar de dado de saúde.
+        logger.info(f"Sono: banco novo ({ate}); sem {rotulo} no relógio, nada a registrar.")
         return None
     pc = pc_da_noite(dia, trechos) if trechos is not None else None
     texto = mensagem(dia, historico[:-1], pc.ultimo if pc else None)
-    pode = estado.get("enviada") != hoje.isoformat() and agora.hour < ENVIA_ATE_H and noite_fechada(dia, cob)
+    ja = estado.get("enviada") == hoje.isoformat()
+    fechada = noite_fechada(dia, cob)
+    if fechada:
+        # LOG 12 (28/10/2026): só o número, para a linha `manha` que o drenador publica ao Planeja.
+        estado["manha"] = {"dia": hoje.isoformat(), "sono_min": int(round(dia.noite.dormindo_min))}
+    pode = not ja and agora.hour < ENVIA_ATE_H and fechada
     if forcar or pode:
         if avisar(texto):
             estado["enviada"] = hoje.isoformat()
+            logger.info(f"Sono: banco novo ({ate}); {rotulo} registrada na aba Logos.")
+        else:
+            logger.warning(f"Sono: banco novo ({ate}); {rotulo} não foi registrada (o aviso falhou).")
+    elif ja:
+        logger.info(f"Sono: banco novo ({ate}); {rotulo} já estava registrada.")
+    elif not fechada:
+        logger.info(f"Sono: banco novo ({ate}); {rotulo} ainda não fechou (espera um banco que cubra "
+                    f"{FOLGA_APOS_ACORDAR.seconds // 60} min depois de acordar, ou o meio-dia).")
+    else:
+        logger.info(f"Sono: banco novo ({ate}); {rotulo} fora do horário de registro (até {ENVIA_ATE_H}h).")
     return texto
 
 
@@ -445,6 +468,19 @@ def verificar(agora: datetime | None = None, avisar: Callable[[str], bool] | Non
         _gravar_estado(estado)
     except OSError as e:
         logger.warning(f"Sono: estado não gravado ({e}); o próximo banco refaz tudo")
+
+
+def manha_de_hoje(agora: datetime | None = None) -> dict | None:
+    """A noite de HOJE já fechada, só em números: {"dia", "sono_min"}. Outro dia, nada (o drenador,
+    outro processo, lê isto do `sono.json` que o watcher grava; noite velha não vira a de hoje)."""
+    agora = agora or datetime.now().astimezone()
+    m = _ler_estado().get("manha")
+    if not isinstance(m, dict) or m.get("dia") != agora.date().isoformat():
+        return None
+    n = m.get("sono_min")
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 < n < 24 * 60:
+        return None
+    return {"dia": m["dia"], "sono_min": n}
 
 
 def _avisar(texto: str) -> bool:

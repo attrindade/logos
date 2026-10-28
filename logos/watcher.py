@@ -248,7 +248,10 @@ def _espelhar_grava(ledger: Ledger) -> None:
 def run():
     config.ensure_directories()
 
-    handlers = [logging.FileHandler(config.LOGS_DIR / "watcher.log", encoding="utf-8")]
+    from .diagnostico import arquivo_de_log
+
+    # Com rotação (5 MB × 3) desde 28/10/2026: o watcher.log crescia sem limite.
+    handlers = [arquivo_de_log(config.LOGS_DIR / "watcher.log")]
     # rodando via pythonw.exe (sem console) sys.stdout é None — StreamHandler falharia
     if sys.stdout is not None:
         handlers.append(logging.StreamHandler(sys.stdout))
@@ -321,4 +324,7 @@ def run():
 
 
 if __name__ == "__main__":
+    from .diagnostico import ligar_rastro
+
+    ligar_rastro("watcher")
     run()

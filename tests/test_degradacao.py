@@ -154,7 +154,7 @@ def test_nota_pronta_volta_no_chat(inbox, tmp_path):
 
     with patch("logos.pipeline.transcribe_file", return_value=Transcription(text=fala, duration_s=60.0)), \
          patch("logos.pipeline.enrich", return_value=enriquecido), \
-         patch("logos.telegram.notify") as notify:
+         patch("logos.aviso.notify") as notify:
         process_file(audio, ledger)
 
     enviado = notify.call_args[0][0]
@@ -175,7 +175,7 @@ def test_diario_devolve_so_a_confirmacao_sem_conteudo(inbox, tmp_path):
 
     with patch("logos.pipeline.transcribe_file", return_value=Transcription(text=fala, duration_s=60.0)), \
          patch("logos.pipeline.enrich", return_value=enriquecido), \
-         patch("logos.telegram.notify") as notify:
+         patch("logos.aviso.notify") as notify:
         process_file(audio, ledger)
 
     enviado = notify.call_args[0][0]
@@ -192,7 +192,7 @@ def test_devolutiva_quebrada_nao_derruba_o_pipeline(inbox, tmp_path):
 
     with patch("logos.pipeline.transcribe_file", return_value=Transcription(text=fala, duration_s=60.0)), \
          patch("logos.pipeline.enrich", return_value={"titulo": "CI", "tags": [], "resumo": "."}), \
-         patch("logos.telegram.notify", side_effect=RuntimeError("bot fora")):
+         patch("logos.aviso.notify", side_effect=RuntimeError("bot fora")):
         process_file(audio, ledger)
 
     assert ledger.get(audio.name, audio.stat().st_size).state == "enriched"

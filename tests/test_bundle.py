@@ -123,7 +123,7 @@ def test_foto_sozinha_ganha_titulo_do_ocr_e_sem_texto_titulo_generico(ledger):
     _run(d2, ledger, image_text="")
     titles = sorted(yaml.safe_load(p.read_text(encoding="utf-8").split("---\n")[1])["titulo"]
                     for p in (config.NOTES_DIR / "Inbox").glob("*.md"))
-    assert "Foto do Telegram" in titles
+    assert "Foto do celular" in titles
 
 
 def test_voz_no_pacote_e_transcrita_e_decide_a_rota(ledger):

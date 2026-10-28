@@ -62,6 +62,11 @@ def run_watcher() -> int:
         )
         return 0
 
+    # Queda nativa ou exceção solta deixam rastro em logs/queda-watcher.log (28/10/2026: o watcher
+    # morreu no meio de uma reunião em 27/10 sem uma linha). Só a instância que ficou com a trava.
+    from logos.diagnostico import ligar_rastro
+
+    ligar_rastro("watcher")
     from logos.watcher import run
 
     run()

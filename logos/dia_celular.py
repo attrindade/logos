@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 
 BASE = organiza.URL.rsplit("/api/", 1)[0]
 FUSO = ZoneInfo("America/Sao_Paulo")
-MODELO = "sonnet"
+# Id completo (pedido dele, 28/10/2026): o Claude que roda na hora é o Opus 5.5; alias curto o CLI ignora.
+MODELO = "claude-opus-5-5"
 LIMITE_CLAUDE_S = 300
 INDEX_SEMANA = Path("C:/Workspace/repo-att/semana/site/index.html")
 NOMES = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
@@ -360,16 +361,20 @@ def _claude_exe() -> str:
     raise RuntimeError("claude.exe não encontrado")
 
 
-def rodar_claude(prompt: str, sistema_: str = SISTEMA, schema_: dict | None = None) -> dict:
-    """Uma chamada sem tela, sem ferramentas e sem as configurações do usuário. Devolve o JSON."""
-    pasta = config.STATE_DIR / "planeja"
+def rodar_claude(prompt: str, sistema_: str = SISTEMA, schema_: dict | None = None, *,
+                 modelo: str = MODELO, limite: int = LIMITE_CLAUDE_S, pasta: Path | None = None,
+                 inteiro: bool = False) -> dict:
+    """Uma chamada sem tela, sem ferramentas e sem as configurações do usuário. Devolve o JSON.
+    A caixa (`logos/caixa.py`, 28/10/2026) passa o modelo pelo id completo, o próprio limite e
+    `inteiro=True`, que devolve a saída inteira do CLI (com `modelUsage`, o modelo que respondeu)."""
+    pasta = pasta or config.STATE_DIR / "planeja"
     pasta.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(
-        [_claude_exe(), "-p", "--model", MODELO, "--tools", "", "--setting-sources", "",
+        [_claude_exe(), "-p", "--model", modelo, "--tools", "", "--setting-sources", "",
          "--strict-mcp-config", "--no-session-persistence", "--output-format", "json",
          "--system-prompt", sistema_, "--json-schema", json.dumps(schema_ or SCHEMA)],
         input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=pasta,
-        timeout=LIMITE_CLAUDE_S, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        timeout=limite, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     try:
         saida = json.loads(r.stdout)
@@ -377,7 +382,7 @@ def rodar_claude(prompt: str, sistema_: str = SISTEMA, schema_: dict | None = No
         raise RuntimeError(f"Claude saiu com {r.returncode}: {(r.stderr or r.stdout)[-300:]}") from None
     if saida.get("is_error") or not isinstance(saida.get("structured_output"), dict):
         raise RuntimeError(f"Claude não devolveu a sugestão: {str(saida.get('result'))[:300]}")
-    return saida["structured_output"]
+    return saida if inteiro else saida["structured_output"]
 
 
 FRASE_CORTAR = "Sai da semana: "

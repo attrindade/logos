@@ -28,5 +28,8 @@ os.environ["LOGOS_GRAVA_DRIVE_DIR"] = ""
 os.environ["LOGOS_AW_PORT"] = "1"
 # Nenhum teste carrega modelo de visão no Ollama; os de extração ligam o que precisam.
 os.environ["LOGOS_VISION_MODEL"] = ""
+# A caixa da captura (logos/caixa.py) chamaria o claude.exe de verdade em todo pacote do Organiza.
+# Desligada aqui; os testes dela ligam com monkeypatch e passam o Claude e o Ollama simulados.
+os.environ["LOGOS_CAIXA_LIGADA"] = "0"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

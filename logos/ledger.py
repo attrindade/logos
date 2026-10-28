@@ -24,13 +24,16 @@ class State(str):
     ENRICHED = "enriched"
     FAILED = "failed"
     ARCHIVE_EXPIRED = "archive_expired"
+    # Pacote sem nada (toque sem fala: o filtro de voz tirou todo o áudio, sem texto nem anexo).
+    # Não vira nota, mas está concluído: não volta a ser processado (28/10/2026).
+    DESCARTADA = "descartada"
 
 
 # Estados em que a nota já existe. ARCHIVE_EXPIRED é ENRICHED depois que o áudio saiu do Archive:
 # o original continua na Inbox (o Syncthing só recebe e o watcher nunca apaga nada lá), então
 # tratá-lo como "não processado" refazia a nota a cada expiração — o laço de 23 a 25/10/2026,
 # que gerou até 4 cópias de cada gravação de agosto.
-CONCLUIDOS = frozenset({State.ENRICHED, State.ARCHIVE_EXPIRED})
+CONCLUIDOS = frozenset({State.ENRICHED, State.ARCHIVE_EXPIRED, State.DESCARTADA})
 
 
 @dataclass

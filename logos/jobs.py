@@ -229,7 +229,7 @@ def disparar(job: Job, notificar=None) -> str:
     """
     global _rodando
     if notificar is None:
-        from .telegram import notify as notificar  # aqui, para jobs.py não depender do bot
+        from .aviso import notify as notificar  # o registro da aba Logos (o bot saiu em 14/10/2026)
 
     caminho = script_path(job)
     if not caminho.is_file():

@@ -55,11 +55,11 @@ def _degradation_reason(error: Exception) -> str:
 
 
 def _notify_degraded(filename: str, reason: str) -> None:
-    """Avisa o dono pelo canal que ele já usa. Import local: telegram importa o pipeline."""
+    """Avisa o dono pelo registro da aba Logos (`logos.aviso`)."""
     try:
-        from . import telegram
-        aviso = f"Logos: {filename} virou nota sem enriquecimento."
-        telegram.notify(aviso + chr(10) + reason)
+        from . import aviso
+        texto = f"Logos: {filename} virou nota sem enriquecimento."
+        aviso.notify(texto + chr(10) + reason)
     except Exception as e:
         logger.warning(f"Não deu para avisar a degradação de {filename}: {e}")
 
@@ -72,9 +72,9 @@ def _notify_note_ready(route: str, note_path: Path, enrichment: dict, tipo: str 
     tudo que passa pelo bot passa pela nuvem do Telegram — então dele vai só a confirmação de
     que existe, sem título, sem ação, sem uma linha do conteúdo."""
     try:
-        from . import telegram
+        from . import aviso
         if route.lower().startswith("diario") or route.lower().startswith("diário"):
-            telegram.notify("Logos: diário registrado.")
+            aviso.notify("Logos: diário registrado.")
             return
         partes = [f"Logos: {enrichment.get('titulo') or note_path.stem}"]
         if tipo == "gravacao":
@@ -86,7 +86,7 @@ def _notify_note_ready(route: str, note_path: Path, enrichment: dict, tipo: str 
         if isinstance(acoes, list) and acoes:
             partes.append("Ações: " + "; ".join(str(a) for a in acoes[:3]))
         partes.append(note_path.name)
-        telegram.notify(chr(10).join(partes))
+        aviso.notify(chr(10).join(partes))
     except Exception as e:
         logger.warning(f"Não deu para devolver a nota de {note_path.name}: {e}")
 
@@ -152,7 +152,7 @@ def _registrar_no_dia(
 def _notify_dia(route: Route, dia: date, registro: dia_mod.Registro, dados: dict) -> None:
     """Devolutiva da entrada. Do diário sai só a confirmação: nem título, nem uma linha da fala."""
     try:
-        from . import telegram
+        from . import aviso
         rotulo = dia_mod.rotulo_dia(dia)
         if route == Route.DIARIO:
             texto = "Logos: diário registrado."
@@ -160,7 +160,7 @@ def _notify_dia(route: Route, dia: date, registro: dia_mod.Registro, dados: dict
                 texto = f"Logos: diário registrado (entrada {registro.numero} de {rotulo})."
             if registro.aviso:
                 texto += chr(10) + registro.aviso
-            telegram.notify(texto)
+            aviso.notify(texto)
             return
         enr = dados.get("enriquecimento") or {}
         partes = [f"Logos: plano para {rotulo}, entrada {registro.numero}"]
@@ -179,7 +179,7 @@ def _notify_dia(route: Route, dia: date, registro: dia_mod.Registro, dados: dict
         partes.append(registro.caminho.name)
         if registro.aviso:
             partes.append(registro.aviso)
-        telegram.notify(chr(10).join(partes))
+        aviso.notify(chr(10).join(partes))
     except Exception as e:
         logger.warning(f"Não deu para devolver a entrada de {registro.caminho.name}: {e}")
 
@@ -543,6 +543,8 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     local = None
     fotos = 0
 
+    tem_conteudo = False  # algo além de voz sem fala e da palavra do tipo (ver _pacote_vazio)
+
     for m in mensagens:
         antes = len(sections)
         tipo = m.get("tipo", "")
@@ -554,6 +556,8 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         if tipo == "texto":
             conteudo = (m.get("texto") or "").strip()
             sections.append(conteudo)
+            so_o_tipo = manifest.get("origem") == "organiza" and conteudo in _SO_O_TIPO
+            tem_conteudo = tem_conteudo or (bool(conteudo) and not so_o_tipo)
         elif tipo in ("voz", "audio") and arquivo:
             tracker.set_stage(
                 PipelineStage.TRANSCRIBING, filename=path.name, file_size=size,
@@ -564,9 +568,11 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 conteudo = transcription.text
                 duracao_audio_s += transcription.duration_s
                 sections.append(f"[voz {_mmss(transcription.duration_s)}] {conteudo}".rstrip())
+                tem_conteudo = tem_conteudo or bool(conteudo.strip())
             except Exception as e:
                 logger.error(f"Falha na transcrição de {arquivo.name} em {path.name}: {e}")
                 sections.append("[voz: falha na transcrição]")
+                tem_conteudo = True  # a falha tem de aparecer numa nota, não sumir como vazia
         elif arquivo and (tipo == "foto" or ext in IMAGE_EXTS):
             fotos += 1
             texto = extractors.image_text(arquivo)
@@ -594,6 +600,12 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         perguntas.extend([m.get("pergunta")] * (len(sections) - antes))
         if not triage_text:
             triage_text = conteudo or legenda
+        tem_conteudo = tem_conteudo or bool(legenda) or bool(m.get("links")) or (
+            tipo not in ("texto", "voz", "audio") and (arquivo is not None or bool(m.get("local"))))
+
+    if not tem_conteudo and not anexos and not links and local is None and not manifest.get("formulario"):
+        _descartar_vazio(path, manifest, digest, message_ids, size, ledger)
+        return
 
     t = triage(path.name, triage_text, fallback=_parse_iso(manifest.get("aberto_em")))
     rota_fixa = _ROTA_DO_MANIFEST.get(manifest.get("rota") or "")
@@ -601,6 +613,7 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
         # O comando já disse a rota; a primeira palavra não decide nada aqui.
         t = replace(t, route=rota_fixa, tag=rota_fixa.value, categoria="", prioridade="")
     transcript = _agrupar(sections, perguntas, manifest.get("rota"), "###", manifest.get("perguntas"))
+    decisao = _caixa(path.name, manifest, transcript, t)
 
     config.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     transcript_path = config.TRANSCRIPTS_DIR / f"{t.recorded_at:%Y-%m-%d_%H-%M-%S}_{t.route.value}_tg.txt"
@@ -655,6 +668,11 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 "titulo": _fallback_title(anexos, local), "tags": [], "resumo": "",
             }
             llm_model = ""
+            if decisao and decisao.get("titulo"):
+                # A nota curta também passou pela caixa: o título vem do classificador, não das 8
+                # primeiras palavras (spec-captura §2.2).
+                enrichment["titulo"] = decisao["titulo"]
+                llm_model = decisao.get("modelo") or ""
         elif is_long_recording(transcript):
             tracker.set_stage(
                 PipelineStage.ENRICHING, filename=path.name, file_size=size, route=route,
@@ -678,6 +696,8 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
                 enrichment = short_enrichment(base) if base.strip() else {"titulo": path.name, "tags": [], "resumo": ""}
                 _notify_degraded(path.name, degradado)
         aplicar_marcas(enrichment, manifest.get("marcas"))
+        if decisao:
+            enrichment["destino"] = decisao["destino"]
         if do_dia:
             dia = _dia_da_entrada(t, manifest, fala=triage_text)
             registro, dados = _registrar_no_dia(
@@ -712,6 +732,21 @@ def _process_bundle(path: Path, manifest: dict, digest: str, message_ids: list[i
     )
 
 
+def _caixa(nome: str, manifest: dict, transcript: str, t: Triage) -> dict | None:
+    """A caixa da captura (`logos/caixa.py`): só anotação do Organiza, sem rota fixada e fora do
+    Diário (o cadeado, a rota `diario` e a 1ª palavra "Diário" nunca chegam ao classificador). Um
+    defeito aqui nunca segura a nota: ela sai como sempre, sem destino."""
+    from . import caixa
+    if not caixa.elegivel(manifest, t.route, transcript):
+        return None
+    tracker.set_stage(PipelineStage.ENRICHING, filename=nome, message="Caixa: decidindo o destino...")
+    try:
+        return caixa.decidir(manifest, transcript, t.recorded_at, route=t.route, pacote=nome)
+    except Exception as e:
+        logger.warning(f"Caixa: {nome} ficou sem destino ({type(e).__name__}: {e})")
+        return None
+
+
 def _agrupar(sections: list[str], perguntas: list[int | None], rota: str | None, nivel: str,
              proprias=None) -> str:
     """Texto do pacote com as respostas sob a pergunta do formulário que estava na tela.
@@ -736,12 +771,39 @@ def _agrupar(sections: list[str], perguntas: list[int | None], rota: str | None,
 PERGUNTAS_POR_ROTA = formulario.PERGUNTAS
 
 
+# A palavra do tipo que o drenador põe sozinha na frente de uma voz (`organiza.manifest_de`, que escreve
+# "Ideia: …" quando há texto): num pacote do app, ela sozinha não é conteúdo.
+_SO_O_TIPO = {"Ideia", "Tarefa", "Reunião"}
+
+
+def _descartar_vazio(path: Path, manifest: dict, digest: str, message_ids: list[int], size: int,
+                     ledger: Ledger) -> None:
+    """Toque sem fala (28/10/2026): o filtro de voz tirou 100% do áudio e não há texto, anexo, link
+    nem formulário. Antes isso virava uma nota vazia com o título de reserva do bot (25 e 27/10, três vezes).
+    Agora não grava nota: fica no ledger como DESCARTADA (concluída, não volta) e entra no registro
+    como `info`. O drenador avisa a Semana. Do Diário vai só o nome do pacote (data e id)."""
+    diario = (manifest.get("rota") or "") == "diario"
+    o_que = "Diário vazio descartado" if diario else "Gravação vazia descartada"
+    logger.info(f"{o_que}: {path.name} não tinha fala (o filtro de voz tirou todo o áudio).")
+    try:
+        from . import eventos
+        eventos.registrar("logos", f"{o_que}: {path.name} não tinha fala nem texto.", "info")
+    except Exception as e:
+        logger.warning(f"Não deu para registrar o descarte de {path.name}: {e}")
+    ledger.upsert(Entry(
+        filename=path.name, size=size, state=State.DESCARTADA, route="descartada",
+        manifest_hash=digest, message_ids=message_ids,
+    ))
+    tracker.set_idle()
+
+
 def _fallback_title(anexos: list[_Anexo], local) -> str:
+    # Os títulos de reserva diziam "Telegram", resto do bot desligado em 14/10/2026 (trocados em 28/10).
     if anexos and all(a.source.suffix.lower() in IMAGE_EXTS for a in anexos):
-        return "Foto do Telegram" if len(anexos) == 1 else "Fotos do Telegram"
+        return "Foto do celular" if len(anexos) == 1 else "Fotos do celular"
     if local and not anexos:
         return f"Localização {local.get('titulo') or ''}".strip()
-    return "Anexo do Telegram"
+    return "Anotação do celular"
 
 
 def retry_failed(ledger: Ledger) -> None:

@@ -117,6 +117,17 @@ WHISPER_VOCABULARIO = bool(_user_cfg.get("whisper_vocabulario", False))
 # Coletor de indícios "parece feito" (`logos/indicios.py`, spec K §1.3): desligado até ele decidir
 # (pergunta 2 do plano de 25/10/2026). Mesmo ligado, só age com a Semana nova (`recursos: propostas`).
 INDICIOS_LIGADO = bool(_user_cfg.get("indicios_ligado", False))
+# A caixa da captura (`logos/caixa.py`, LOG 9 de 28/10/2026). D1a respondida por ele em 28/10: o Claude
+# na hora, e tem de ser o Opus 5.5, pelo id completo (alias curto como "opus" o CLI ignora e roda outro
+# modelo). O Ollama local é a reserva quando o Claude falha ou passa do tempo. A variável de ambiente
+# LOGOS_CAIXA_LIGADA=0 desliga (a suíte de testes usa isso para nunca chamar o claude.exe).
+_env_caixa = os.getenv("LOGOS_CAIXA_LIGADA")
+CAIXA_LIGADA = (_env_caixa not in ("0", "false", "")) if _env_caixa is not None else bool(_user_cfg.get("caixa_ligada", True))
+CAIXA_MODELO = str(_user_cfg.get("caixa_modelo", "claude-opus-5-5"))
+CAIXA_RESERVA = str(_user_cfg.get("caixa_reserva", "gemma4:e4b"))
+# Medido em 28/10/2026 (5 frases inventadas, Opus 5.5): ver o feito2-LOG. Passou disso, vai a reserva.
+CAIXA_LIMITE_CLAUDE_S = int(_user_cfg.get("caixa_limite_claude_s", 60))
+CAIXA_LIMITE_OLLAMA_S = int(_user_cfg.get("caixa_limite_ollama_s", 300))
 
 # ---------------------------------------------------------
 # LLM (Ollama Local)
@@ -147,6 +158,30 @@ AW_PORT = int(os.getenv("LOGOS_AW_PORT") or _user_cfg.get("aw_port", 5600))
 # Sem valor, `python -m logos.relogio` pede --db e não faz nada.
 _raw_gb_db = os.getenv("LOGOS_GADGETBRIDGE_DB") or _user_cfg.get("gadgetbridge_db")
 GADGETBRIDGE_DB = Path(_raw_gb_db).expanduser() if _raw_gb_db else None
+
+# ---------------------------------------------------------
+# Vault no celular (`logos/vault_celular.py`)
+# ---------------------------------------------------------
+# Começos de caminho (relativos ao vault) que NÃO vão para o celular, além das guardas fixas. Vazio
+# de fábrica = tudo da lista vai, como desde 14/10. Em 28/10/2026 viu-se que o reenvio "1 enviada(s)"
+# a cada 10 min era o `inbox/sessoes-<dia>.md`, que o hook do Claude Code reescreve a cada resposta:
+# ["inbox/sessoes-"] corta isso (e apaga as cópias dele no celular). Decisão dele.
+VAULT_CELULAR_FORA = [str(x) for x in (_user_cfg.get("vault_celular_fora") or [])]
+
+# ---------------------------------------------------------
+# Vigia: checagens novas de 28/10/2026 (`logos/vigia.py`)
+# ---------------------------------------------------------
+# Relógio sem amostra nova há mais de 48 h vira "atenção" na aba Logos. Ligado de fábrica (D3,
+# padrão seguro (c) do plano de 28/10): se ele parou de usar o relógio, `vigia_relogio: false`.
+VIGIA_RELOGIO = bool(_user_cfg.get("vigia_relogio", True))
+# Coletores do ActivityWatch que devem ter evento novo (início do nome do bucket). Sem evento há
+# mais de 48 h de PC ligado, ou nunca, vira "atenção". A janela tem checagem própria (chk_aw).
+# Fora da lista de fábrica (revisão de 28/10/2026, achado do pacote AW): o `input`, tirado de
+# propósito do aw-qt.toml em 08/10, e o `obsidian`, que só registra com o Obsidian de tela aberto
+# (não é superfície, plano v2). Com eles, a "atenção" seria eterna. O `web-chrome_` com o "_" pula
+# o bucket órfão `aw-watcher-web-chrome` (sem `_att`, parado desde 14/09).
+VIGIA_AW_ESPERADOS = [str(x) for x in (_user_cfg.get("vigia_aw_esperados") or (
+    "aw-watcher-afk_", "aw-watcher-web-chrome_"))]
 
 # ---------------------------------------------------------
 # Telegram, anexos e OCR
@@ -193,6 +228,29 @@ ARCHIVE_RETENTION_DAYS = int(os.getenv("ARCHIVE_RETENTION_DAYS") or _user_cfg.ge
 STABILITY_CHECK_INTERVAL_S = int(os.getenv("STABILITY_CHECK_INTERVAL_S") or _user_cfg.get("stability_check_interval_s", 5))
 STABILITY_CHECK_COUNT = int(os.getenv("STABILITY_CHECK_COUNT") or _user_cfg.get("stability_check_count", 2))
 PROCESS_PRIORITY_BELOW_NORMAL = bool(os.getenv("PROCESS_PRIORITY_BELOW_NORMAL") or _user_cfg.get("process_priority_below_normal", True))
+
+
+def secrets_path() -> Path:
+    """Os segredos ficam fora do repo, em state/secrets.yaml (saiu de `logos/telegram.py` em 28/10/2026)."""
+    return STATE_DIR / "secrets.yaml"
+
+
+def load_secrets() -> dict:
+    try:
+        data = yaml.safe_load(secrets_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_secrets(updates: dict) -> None:
+    path = secrets_path()
+    data = load_secrets()
+    data.update(updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def ensure_directories():

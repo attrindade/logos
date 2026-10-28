@@ -192,7 +192,7 @@ def _rodar(pasta, ledger, enrichment=None, notify=None):
          patch("logos.pipeline.transcribe_file", return_value=Transcription("fala", 3.0)), \
          patch("logos.extractors.document_text", return_value="texto do pdf"), \
          patch("logos.pipeline.aw.post_capture"), \
-         patch("logos.telegram.notify") as avisos:
+         patch("logos.aviso.notify") as avisos:
         process_bundle(pasta, ledger)
     return llm, avisos
 
@@ -294,7 +294,7 @@ def test_audio_do_gravador_soma_na_nota_do_dia_e_planejamento_amanha(vault, tmp_
         audio = config.INBOX_DIR / nome
         audio.write_bytes(b"audio" + nome.encode())
         with patch("logos.pipeline.transcribe_file", return_value=Transcription(fala, 5.0)), \
-             patch("logos.pipeline.aw.post_capture"), patch("logos.telegram.notify") as avisos:
+             patch("logos.pipeline.aw.post_capture"), patch("logos.aviso.notify") as avisos:
             process_file(audio, ledger)
 
     texto, fm = _ler(dia.caminho_nota(Route.DIARIO, HOJE))

@@ -1,0 +1,7 @@
+[
+ {"texto": "amanhã cedo eu preciso ligar pro encanador antes das nove pra marcar a visita", "destino": "plano"},
+ {"texto": "quando eu for planejar a semana que vem quero separar uma tarde pra estudar estatística bayesiana", "destino": "fim_de_semana"},
+ {"texto": "o botão de desfazer do planeja tá muito pequeno, devia ser maior e ficar embaixo", "destino": "recado", "nomes": ["Planeja"]},
+ {"texto": "ideia: um caderno de receitas com o que sobra na geladeira, tipo um gerador de receita", "destino": "nota"},
+ {"texto": "acho que talvez um dia eu devia, sei lá, aprender a tocar violão, né", "destino": "nota"}
+]

@@ -242,10 +242,59 @@ def test_noite_ainda_aberta_espera_o_proximo_banco(ambiente):
     assert sono._ler_estado()["enviada"] == DIA.isoformat()
 
 
-def test_depois_das_18h_nao_manda(ambiente):
+def test_depois_das_18h_ainda_registra(ambiente):
+    # 28/10/2026: o banco chegava depois das 18h e a mensagem nunca entrava no registro (LOG 4).
     _, enviadas, checar = ambiente
     checar(_dt(19, 0))
-    assert enviadas == []
+    assert len(enviadas) == 1
+
+
+def test_noite_fechada_vira_um_evento_de_sono_uma_vez_so(ambiente, caplog):
+    """LOG 4: com um banco de exemplo de noite fechada, o caminho de verdade (o `_avisar` da
+    produção) grava 1 evento `origem: sono`, o sono.json ganha `enviada`, e outra passada não repete."""
+    import logging
+    from logos import eventos
+    db, _, _ = ambiente
+
+    def passar(agora):
+        sono._ultima_checagem = 0.0
+        sono.verificar(agora, uso_pc=lambda ini, fim: [(_dt(0, 0), _dt(0, 20))])  # avisar = o de produção
+
+    with caplog.at_level(logging.INFO, logger="logos.sono"):
+        passar(_dt(11, 30))
+    evs = [e for e in eventos.ultimos() if e["origem"] == "sono"]
+    assert len(evs) == 1 and "8h04 dormindo" in evs[0]["texto"]
+    assert sono._ler_estado()["enviada"] == DIA.isoformat()
+    assert "noite de 13/10 registrada" in caplog.text and "8h04" not in caplog.text
+    st = db.stat()
+    os.utime(db, (st.st_atime, st.st_mtime + 3600))
+    passar(_dt(12, 30))
+    assert len([e for e in eventos.ultimos() if e["origem"] == "sono"]) == 1
+
+
+def test_noite_que_nao_fecha_fica_no_log(ambiente, caplog):
+    import logging
+    db, enviadas, checar = ambiente
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM HUAWEI_ACTIVITY_SAMPLE WHERE SOURCE = 11")
+    ts = int(_dt(10, 15).timestamp())
+    con.execute("INSERT INTO HUAWEI_ACTIVITY_SAMPLE VALUES (?,1,1,?,11,-1,1,300,0,0,-1,80,60)", (ts, ts + 60))
+    con.commit()
+    con.close()
+    with caplog.at_level(logging.INFO, logger="logos.sono"):
+        checar(_dt(10, 30))
+    assert enviadas == [] and "noite de 13/10 ainda não fechou" in caplog.text
+    assert "manha" not in sono._ler_estado()  # LOG 12: sem noite fechada, nenhuma linha
+
+
+def test_noite_fechada_deixa_o_numero_da_manha(ambiente):
+    """LOG 12 (D3 = (a)): a noite fechada deixa só o número em `sono.json` para a linha `manha`."""
+    _, _, checar = ambiente
+    checar(_dt(11, 30))
+    assert sono._ler_estado()["manha"] == {"dia": DIA.isoformat(), "sono_min": 8 * 60 + 4}
+    assert sono.manha_de_hoje(_dt(11, 30)) == {"dia": DIA.isoformat(), "sono_min": 484}
+    from datetime import timedelta
+    assert sono.manha_de_hoje(_dt(11, 30) + timedelta(days=1)) is None  # amanhã, a noite de hoje é velha
 
 
 def test_sem_banco_configurado_nao_faz_nada(monkeypatch):

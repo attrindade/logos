@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.request
@@ -68,11 +69,18 @@ ATRASO_TAREFA_S = 30 * 60
 # Ruído de boot (medido de 14 a 25/10/2026, ~2/3 dos "atenção" da aba): não vira atenção.
 # 0x40010004 (1073807364): o Windows encerrou o processo no desligamento — AW Alertas e AW Checkin
 # rodam o dia todo e "terminam" assim a cada vez que o PC desliga. Não entra nem no registro.
-TAREFA_ENCERRADA_NO_DESLIGAMENTO = {0x40010004}
+# 0xC000013A (3221225786, STATUS_CONTROL_C_EXIT): o mesmo, quando o Windows fecha o console do processo
+# no desligamento (28/10/2026).
+TAREFA_ENCERRADA_NO_DESLIGAMENTO = {0x40010004, 0xC000013A}
 # 75 (jobs.EXIT_OCUPADO, `_run-claude.ps1`): no boot as tarefas atrasadas do vault disparam juntas e
 # as que perdem a trava saem sem fazer nada; o job roda na vez seguinte. Só vale para as "Vault …",
 # que são as que usam essa trava: 75 em outra tarefa continua sendo erro.
 TAREFA_OCUPADA = 75
+# Checagens de 28/10/2026: o que sumia sem ninguém ver.
+RELOGIO_MAX_S = 48 * 3600      # o relógio sincroniza ao menos uma vez por dia quando está em uso
+AW_COLETOR_MAX_S = 48 * 3600   # medido em horas de PC ligado (pela janela), não de relógio de parede
+BRIEFING_CONFERE_H = 11        # às 11h o briefing das 8h já devia existir...
+BRIEFING_LIGADO_ANTES = (10, 30)  # ...se o PC ligou antes das 10h30 (StartWhenAvailable roda no boot)
 # O Ollama leva alguns minutos para responder depois que o PC liga (4 "falha" + "voltou ao normal"
 # em ~5 min entre 14 e 25/10). Nesse intervalo, não responder é "subindo", não falha.
 BOOT_GRACA_S = 15 * 60
@@ -228,6 +236,86 @@ def chk_aw(agora: float, boot: float | None = None) -> dict:
     return _item("aw", nome, "ok", "")
 
 
+def chk_relogio(agora: float, db: Path | None = None) -> dict | None:
+    """A amostra mais nova do relógio no banco do Gadgetbridge. O sono e o "Relógio — …" pararam em
+    22/10/2026 sem aviso nenhum. Só o MAX(TIMESTAMP), com o banco aberto só para leitura: nenhum dado
+    de saúde sai daqui. None quando desligado (`vigia_relogio: false`) ou sem banco configurado."""
+    if not config.VIGIA_RELOGIO:
+        return None
+    db = db if db is not None else config.GADGETBRIDGE_DB
+    if db is None:
+        return None
+    nome = "Relógio"
+    if not db.exists():
+        return _item("relogio", nome, "atencao", "O banco do Gadgetbridge não chegou ao PC.")
+    try:
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            ts = con.execute("SELECT MAX(TIMESTAMP) FROM HUAWEI_ACTIVITY_SAMPLE").fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return _item("relogio", nome, "atencao", "Não deu para ler o banco do Gadgetbridge.")
+    if not ts:
+        return _item("relogio", nome, "atencao", "O banco do Gadgetbridge não tem nenhuma amostra.")
+    if agora - ts > RELOGIO_MAX_S:
+        return _item("relogio", nome, "atencao", f"Sem dados desde {datetime.fromtimestamp(ts):%d/%m}: o sono não está sendo medido.")
+    return _item("relogio", nome, "ok", f"Última amostra {datetime.fromtimestamp(ts):%d/%m %H:%M}.")
+
+
+def chk_aw_coletores(agora: float, buckets: dict | None = None) -> dict | None:
+    """Os coletores esperados (`vigia_aw_esperados`) com evento recente. O `input` parou em 08/10/2026 e
+    o `obsidian` nunca registrou nada, e ninguém viu. A idade conta a partir da última janela (o PC
+    desligado num fim de semana não vira alarme). None quando o servidor não responde (chk_aw avisa)."""
+    if buckets is None:
+        try:
+            buckets = _get_json("http://127.0.0.1:5600/api/0/buckets/")
+        except Exception:
+            return None
+    janelas = [t for k, b in buckets.items() if k.startswith("aw-watcher-window_")
+               for t in [_iso_para_ts(b.get("last_updated") or "")] if t]
+    ref = max(janelas) if janelas else agora
+    problemas = []
+    for prefixo in config.VIGIA_AW_ESPERADOS:
+        achados = {k: b for k, b in buckets.items() if k.startswith(prefixo)}
+        curto = prefixo.removeprefix("aw-watcher-").rstrip("_")
+        if not achados:
+            problemas.append(f"{curto} não existe")
+            continue
+        ultimos = [t for t in (_iso_para_ts(b.get("last_updated") or "") for b in achados.values()) if t]
+        if not ultimos:
+            problemas.append(f"{curto} nunca registrou")
+        elif ref - max(ultimos) > AW_COLETOR_MAX_S:
+            problemas.append(f"{curto} parado desde {datetime.fromtimestamp(max(ultimos)):%d/%m}")
+    nome = "Coletores do ActivityWatch"
+    if problemas:
+        return _item("aw-coletores", nome, "atencao", "; ".join(problemas).capitalize() + ".")
+    return _item("aw-coletores", nome, "ok", "")
+
+
+def chk_briefing(agora: float, boot: float | None = None, vault: Path | None = None) -> dict | None:
+    """Às 11h, o briefing das 8h de hoje tem de existir se o PC ligou antes das 10h30. Em 23 e 25/10 ele
+    se perdeu no código 75 e só se notava no dia seguinte. None sem vault configurado e, sem o
+    briefing, antes das 11h."""
+    vault = vault if vault is not None else config.VAULT_DIR
+    if vault is None:
+        return None
+    nome = "Briefing de hoje"
+    momento = datetime.fromtimestamp(agora)
+    hoje = momento.date()
+    if (vault / "briefings" / f"{hoje.isoformat()}.md").exists():
+        return _item("briefing", nome, "ok", "Saiu.")
+    if momento.hour < BRIEFING_CONFERE_H:
+        # Fora da lista até as 11h: um "ok" à meia-noite faria a atenção de ontem virar "voltou ao
+        # normal" sem o briefing ter saído.
+        return None
+    boot = _boot() if boot is None else boot
+    limite = datetime(hoje.year, hoje.month, hoje.day, *BRIEFING_LIGADO_ANTES).timestamp()
+    if boot >= limite:
+        return _item("briefing", nome, "ok", f"O PC ligou às {datetime.fromtimestamp(boot):%H:%M}; o job ainda pode estar na fila.")
+    return _item("briefing", nome, "atencao", "Briefing de hoje não saiu.")
+
+
 def _syncthing_api() -> tuple[str, str, dict[str, str]] | None:
     """(endereço, chave da API, {id do aparelho: nome}) lidos da config local do Syncthing."""
     base = Path(os.environ.get("LOCALAPPDATA", "")) / "Syncthing" / "config.xml"
@@ -371,7 +459,18 @@ def checar(agora: float | None = None, lista=_BUSCAR) -> list[dict]:
         *chk_syncthing(procs, agora),
         chk_disco(),
         *chk_tarefas(tarefas() if lista is _BUSCAR else lista, agora),
+        # As de 28/10 não derrubam as outras: uma checagem nova com defeito só some da lista.
+        *[it for it in (_seguro(chk_relogio, agora), _seguro(chk_aw_coletores, agora),
+                        _seguro(chk_briefing, agora)) if it],
     ]
+
+
+def _seguro(chk, agora: float) -> dict | None:
+    try:
+        return chk(agora)
+    except Exception as e:
+        logger.warning(f"Vigia: {chk.__name__} falhou: {e}")
+        return None
 
 
 # --------------------------------------------------------------------------- memória e eventos
