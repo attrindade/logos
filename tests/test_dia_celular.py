@@ -267,3 +267,132 @@ def test_plano_mostra_minimo_calculado_habito_folga_e_guardadas():
     assert "Pós-defeso" not in sexta
     # dia sem nenhum min marcado: o texto do dia é a reserva
     assert dc.minimo_do_dia({"min": "O roteiro.", "blocos": []}) == "O roteiro."
+
+
+# ---------------------------------------------------------------- voz e "O dia mudou" (28/10/2026)
+
+import base64  # noqa: E402
+
+from logos import stt  # noqa: E402
+
+AUDIO = b"\x00\x00\x00\x18ftypM4A audio falso"
+
+
+def _http_voz(monkeypatch, semana, audio=AUDIO, complementos=None):
+    feitos, gets = [], []
+
+    def http(metodo, caminho, key, corpo=None):
+        if metodo == "GET":
+            gets.append(caminho)
+            if caminho.startswith("/api/dia?audio="):
+                return {"id": caminho.split("=", 1)[1], "audio": base64.b64encode(audio).decode(), "mime": "audio/mp4"}
+            if caminho == "/api/complementos":
+                if complementos is None:
+                    raise RuntimeError("sem a caixa")
+                return {"complementos": complementos}
+            return {"/api/semana": semana, "/api/dia": {"conversa": []}, "/api/remarcar": {"remarcar": []}}[caminho]
+        feitos.append(corpo)
+        return {"ok": True, "estado": corpo.get("estado")}
+
+    monkeypatch.setattr(dc, "_http", http)
+    monkeypatch.setattr(dc, "ordem_de_corte", lambda *a: ["Do HTML"])
+    return feitos, gets
+
+
+def test_audio_transcrito_vira_texto_da_fala(monkeypatch):
+    feitos, gets = _http_voz(monkeypatch, SEMANA_NOVA)
+    vistos = {}
+
+    def transcribe_file(p):  # o STT de verdade é trocado; o arquivo temporário existe e é .m4a
+        vistos["caminho"] = p
+        vistos["bytes"] = p.read_bytes()
+        return stt.Transcription(text="  a reunião passou para quinta  ", duration_s=4.0)
+
+    monkeypatch.setattr(stt, "transcribe_file", transcribe_file)
+    prompts = []
+
+    def claude(p):
+        prompts.append(p)
+        return {"resposta": "ok", "mudancas": [], "ops": []}
+
+    fala = {"id": "d-voz00001", "tipo": "dia", "dia": "2026-10-21", "texto": "", "tem_audio": True,
+            "contexto": {"origem": "mudou"}}
+    assert dc.atender("k", fala, claude=claude, agora=MADRUGADA) == "pronta"
+    assert "/api/dia?audio=d-voz00001" in gets
+    assert vistos["bytes"] == AUDIO and vistos["caminho"].suffix == ".m4a"
+    assert not vistos["caminho"].exists()  # o temporário foi apagado
+    assert feitos[0] == {"id": "d-voz00001", "estado": "pensando"}
+    assert feitos[1] == {"id": "d-voz00001", "acao": "transcrito", "texto": "a reunião passou para quinta"}
+    assert "a reunião passou para quinta" in prompts[0]
+    assert feitos[-1]["estado"] == "pronta"
+
+
+def test_audio_com_texto_escrito_junta_os_dois(monkeypatch):
+    feitos, _ = _http_voz(monkeypatch, SEMANA_NOVA)
+    fala = {"id": "d-voz00002", "tipo": "dia", "dia": "2026-10-21", "texto": "escrito", "tem_audio": True}
+    dc.atender("k", fala, claude=lambda p: {"resposta": "ok", "mudancas": [], "ops": []},
+               agora=MADRUGADA, transcrever_=lambda p: "falado")
+    assert feitos[1]["texto"] == "escrito\nfalado"
+
+
+@pytest.mark.parametrize("transcrever_", [lambda p: "   ", lambda p: (_ for _ in ()).throw(RuntimeError("ffmpeg"))])
+def test_audio_vazio_ou_com_erro_vira_falha_sem_claude(monkeypatch, transcrever_):
+    feitos, _ = _http_voz(monkeypatch, SEMANA_NOVA)
+    fala = {"id": "d-voz00003", "tipo": "dia", "dia": "2026-10-21", "texto": "", "tem_audio": True,
+            "contexto": {"origem": "mudou"}}
+    claude = lambda p: pytest.fail("não devia chamar o Claude")  # noqa: E731
+    assert dc.atender("k", fala, claude=claude, agora=MADRUGADA, transcrever_=transcrever_) == "falha"
+    assert feitos[-1] == {"id": "d-voz00003", "estado": "falha", "resposta": dc.FALHA_AUDIO}
+    assert not any(f.get("acao") == "transcrito" for f in feitos)
+
+
+def test_audio_sem_bytes_vira_falha(monkeypatch):
+    feitos, _ = _http_voz(monkeypatch, SEMANA_NOVA, audio=b"")
+    fala = {"id": "d-voz00004", "tipo": "dia", "dia": "2026-10-21", "texto": "", "tem_audio": True}
+    assert dc.atender("k", fala, claude=lambda p: pytest.fail("Claude"), agora=MADRUGADA,
+                      transcrever_=lambda p: pytest.fail("não devia transcrever")) == "falha"
+    assert feitos[-1]["resposta"] == dc.FALHA_AUDIO
+
+
+def test_prompt_do_modo_mudou():
+    fala = {"id": "d-m1", "tipo": "dia", "dia": "2026-10-21", "texto": "o Renato desmarcou",
+            "contexto": {"origem": "mudou", "agora": "Renato"}}
+    comp = [{"id": "c1", "texto": "pensar no\ncurso", "criado": "2026-10-20T10:00:00Z"}]
+    p = dc.montar_prompt(fala, SEMANA_NOVA, [], [], [], MADRUGADA, comp)
+    assert "# O dia mudou: o que ele contou\no Renato desmarcou" in p
+    assert "Replaneje o resto da semana" in p and "(No celular, o bloco de agora era: Renato)" in p
+    assert "- 2026-10-20: pensar no / curso" in p and "não são pendências" in p
+    # sem a origem, o prompt é o de antes (e a caixa não entra)
+    normal = dc.montar_prompt(dict(fala, contexto=None), SEMANA_NOVA, [], [], [], MADRUGADA, comp)
+    assert "# O que ele contou agora" in normal and "Replaneje" not in normal and "curso" not in normal
+    # o sistema troca "mude o mínimo" pelo trecho de replanejar
+    assert dc._LINHA_MINIMO in dc.sistema(SEMANA_NOVA) and "O dia mudou" not in dc.sistema(SEMANA_NOVA)
+    s = dc.sistema(SEMANA_NOVA, mudou=True)
+    assert dc._LINHA_MINIMO not in s and "Ele abriu \"O dia mudou\"" in s and "Qui 29/10" in s
+    assert '"op":"resumo"' in s  # o resumo continua
+    assert dc.eh_mudou(fala) and not dc.eh_mudou(dict(fala, tipo="fechamento"))
+
+
+def test_guardar_so_no_modo_mudou_e_com_o_recurso(monkeypatch):
+    enum = lambda sem, m: dc.schema(sem, m)["properties"]["ops"]["items"]["properties"]["op"]["enum"]  # noqa: E731
+    antiga = {"dias": []}
+    assert "guardar" in enum(SEMANA_NOVA, True)
+    assert "guardar" not in enum(SEMANA_NOVA, False) and "guardar" not in enum(antiga, True)
+    assert '"op":"guardar"' in dc.sistema(SEMANA_NOVA, mudou=True)
+    assert '"op":"guardar"' not in dc.sistema(SEMANA_NOVA) and '"op":"guardar"' not in dc.sistema(antiga, mudou=True)
+
+    resposta = {"resposta": "Quinta ficou cheia.", "mudancas": ["Qui 22/10: sai o PPJ"],
+                "ops": [{"op": "guardar", "tarefa": "p1"}]}
+    fala = {"id": "d-m2", "tipo": "dia", "dia": "2026-10-21", "texto": "x", "contexto": {"origem": "mudou"}}
+    feitos, gets = _http_voz(monkeypatch, SEMANA_NOVA, complementos=[])
+    dc.atender("k", fala, claude=lambda p: resposta, agora=MADRUGADA)
+    assert feitos[-1]["ops"] == [{"op": "guardar", "tarefa": "p1"}] and "/api/complementos" in gets
+    # fora do modo mudou, a mesma op sai (e a caixa nem é buscada)
+    feitos, gets = _http_voz(monkeypatch, SEMANA_NOVA, complementos=[])
+    dc.atender("k", dict(fala, contexto=None), claude=lambda p: resposta, agora=MADRUGADA)
+    assert feitos[-1]["ops"] == [] and "/api/complementos" not in gets
+    # sem o recurso, também sai; e a caixa que falha não derruba a fala
+    antiga = {k: v for k, v in SEMANA_NOVA.items() if k != "recursos"}
+    feitos, _ = _http_voz(monkeypatch, antiga, complementos=None)
+    assert dc.atender("k", fala, claude=lambda p: resposta, agora=MADRUGADA) == "pronta"
+    assert feitos[-1]["ops"] == []

@@ -21,19 +21,29 @@ API antiga e nova: a Semana nova manda `recursos` em `/api/semana`. Sem `recurso
 item dele), o comportamento é o de antes: sem `guardar` ("Próx. semana" fica sem decisão), sem
 `resumo` e com a ordem de corte lida do index.html.
 
+Voz e "O dia mudou" (contrato de 28/10/2026, `_planos/2026-10-28-dia-mudou-voz`): fala com
+`tem_audio` é baixada, transcrita (`stt.transcribe_file`, como a voz do pipeline) e devolvida à
+Semana como texto antes de pensar; áudio sem texto vira falha sem o Claude. Fala com
+`contexto.origem == "mudou"` pede ao Claude o resto da semana replanejado como conjunto, com a caixa
+de complementos como contexto e `guardar` liberado se a Semana souber.
+
 Fica de fora: nada do vault entra no prompt, e o Claude roda sem ferramentas (`--tools ""`),
 sem as configurações do usuário e com um prompt de sistema próprio, curto.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -61,11 +71,20 @@ def tem_recurso(semana: dict, nome: str) -> bool:
     return nome in (semana.get("recursos") or [])
 
 
-def ops_do_claude(semana: dict) -> list[str]:
-    return OPS_CLAUDE + (["resumo"] if tem_recurso(semana, "resumo") else [])
+def eh_mudou(fala: dict) -> bool:
+    """Fala aberta pela folha "O dia mudou" do Planeja (contrato de 28/10/2026, §3): o Claude
+    replaneja o resto da semana como conjunto, em vez de mudar o mínimo."""
+    return fala.get("tipo") != "fechamento" and (fala.get("contexto") or {}).get("origem") == "mudou"
 
 
-def schema(semana: dict) -> dict:
+def ops_do_claude(semana: dict, mudou: bool = False) -> list[str]:
+    """As ops que o Claude pode mandar. `guardar` só no modo "mudou" e com a Semana sabendo aplicar;
+    fora dele, quem guarda é ele no fechamento, sem o Claude."""
+    return (OPS_CLAUDE + (["guardar"] if mudou and tem_recurso(semana, "guardar") else [])
+            + (["resumo"] if tem_recurso(semana, "resumo") else []))
+
+
+def schema(semana: dict, mudou: bool = False) -> dict:
     return {
         "type": "object",
         "properties": {
@@ -76,7 +95,7 @@ def schema(semana: dict) -> dict:
                 "items": {
                     "type": "object",
                     "properties": {
-                        "op": {"type": "string", "enum": ops_do_claude(semana)},
+                        "op": {"type": "string", "enum": ops_do_claude(semana, mudou)},
                         "tarefa": {"type": "string"}, "dia": {"type": "string"}, "bloco": {"type": "string"},
                         "i": {"type": "string"}, "f": {"type": "string"}, "para": {"type": "string"},
                         "k": {"type": "string"}, "nome": {"type": "string"},
@@ -126,13 +145,37 @@ você sugere e por quê em 2 a 4 frases. "mudancas" tem uma frase por mudança, 
 "Roteiro das entrevistas vai para quinta, 14h" ou "Sai: contagem de empresas (primeira da ordem de corte)".
 """
 _LINHA_CORTAR = '- {"op":"cortar","tarefa":ID} a tarefa sai da semana; volta na preparação do fim de semana.'
+_LINHA_MINIMO = "- Mude o mínimo que resolve. Uma fala sobre a tarde não mexe na quinta sem motivo."
+
+SISTEMA_GUARDAR = """- {"op":"guardar","tarefa":ID} a tarefa sai desta semana e vai para a semana que vem: volta como
+  sobra na preparação do fim de semana. Use para o que não cabe mais e pode esperar; cortar é para o
+  que não vale mais fazer."""
+
+# Modo "o dia mudou" (contrato de 28/10/2026, §3): entra no lugar de "Mude o mínimo que resolve".
+SISTEMA_MUDOU = """- Ele abriu "O dia mudou": algo saiu do previsto e ele quer o resto da semana pensado de novo,
+  como um conjunto. Veja o que mudou hoje, o que ficou para trás nos dias que passaram, o mínimo de
+  cada dia que vem e onde cada coisa cabe. Pode mexer em vários dias, se for o que resolve; não mexa
+  no que está bem só por mexer."""
+
+ESCRITA_MUDOU = """
+No modo "o dia mudou", "resposta" explica o raciocínio em 2 a 4 frases (o que mudou, o que você fez
+com a semana e por quê), e cada frase de "mudancas" começa pelo dia, como "Qui 29/10: roteiro das
+entrevistas vai para as 14h" ou "Sex 30/10: sai a contagem de empresas (primeira da ordem de corte)".
+"""
 
 
-def sistema(semana: dict) -> str:
-    """O prompt de sistema: a op `resumo` só entra se a Semana souber aplicá-la."""
+def sistema(semana: dict, mudou: bool = False) -> str:
+    """O prompt de sistema: a op `resumo` só entra se a Semana souber aplicá-la; no modo "mudou",
+    o trecho de replanejar a semana entra no lugar de "mude o mínimo", e `guardar` com o recurso."""
+    ops = [_LINHA_CORTAR]
+    if mudou and tem_recurso(semana, "guardar"):
+        ops.append(SISTEMA_GUARDAR)
     if tem_recurso(semana, "resumo"):
-        return SISTEMA.replace(_LINHA_CORTAR, _LINHA_CORTAR + "\n" + SISTEMA_RESUMO)
-    return SISTEMA
+        ops.append(SISTEMA_RESUMO)
+    texto = SISTEMA.replace(_LINHA_CORTAR, "\n".join(ops))
+    if mudou:
+        texto = texto.replace(_LINHA_MINIMO, SISTEMA_MUDOU) + ESCRITA_MUDOU
+    return texto
 
 
 class SemanaRecusou(Exception):
@@ -246,7 +289,8 @@ def _conversa_de_hoje(conversa: list[dict], hoje: str, atual: str) -> str:
     for c in conversa:
         if c["dia"] != hoje or c["id"] == atual or c["estado"] in ("novo", "pensando"):
             continue
-        linhas.append(f"- {c['criada'][11:16]} UTC ele: {c['texto'] or '(fechamento sem frase)'}")
+        vazio = "(fechamento sem frase)" if c.get("tipo") == "fechamento" else "(áudio que não deu para entender)"
+        linhas.append(f"- {c['criada'][11:16]} UTC ele: {c['texto'] or vazio}")
         if c.get("resposta"):
             linhas.append(f"  você: {c['resposta']} [{c['estado']}]")
     return "\n".join(linhas) or "(nada ainda)"
@@ -292,8 +336,12 @@ def _destino_em_texto(x: dict, fala: dict, agora: datetime) -> str:
     return "outro dia desta semana (você escolhe)"
 
 
+COMPLEMENTOS_MAX = 15   # os mais recentes da caixa de complementos (modo "mudou")
+COMPLEMENTO_MAX = 400   # caracteres de cada um no prompt
+
+
 def montar_prompt(fala: dict, semana: dict, conversa: list[dict], remarcar: list[dict],
-                  corte: list[str], agora: datetime) -> str:
+                  corte: list[str], agora: datetime, complementos: list[dict] | None = None) -> str:
     hoje = _hoje(agora)
     partes = [
         _linha_agora(agora),
@@ -342,6 +390,24 @@ def montar_prompt(fala: dict, semana: dict, conversa: list[dict], remarcar: list
             f"O que ele disse sobre o dia: {fala['texto'] or '(nada)'}",
             "A resposta é o que ele lê amanhã cedo: diga como ficou o amanhã em 2 a 3 frases.",
         ]
+    elif eh_mudou(fala):
+        notas = [c for c in complementos or [] if isinstance(c, dict) and str(c.get("texto") or "").strip()]
+        if notas:  # a caixa é da preparação do fim de semana: contexto, não pendência
+            partes += [
+                "# Anotações dele para a preparação do fim de semana (não são pendências desta semana;"
+                " só use se a fala dele tocar nelas)",
+                "\n".join(f"- {str(c.get('criado') or '')[:10]}: "
+                          + re.sub(r"\s*\n\s*", " / ", str(c["texto"]).strip())[:COMPLEMENTO_MAX]
+                          for c in notas[-COMPLEMENTOS_MAX:]),
+                "",
+            ]
+        partes += ["# O dia mudou: o que ele contou", fala["texto"]]
+        ctx = fala.get("contexto") or {}
+        if ctx.get("agora"):
+            partes.append(f"(No celular, o bloco de agora era: {ctx['agora']})")
+        partes.append("Replaneje o resto da semana pensando no conjunto: o que mudou hoje, o que ficou para"
+                      " trás, o mínimo de cada dia e onde cada coisa cabe. Na resposta, o raciocínio em 2 a 4"
+                      " frases; em mudancas, uma frase por mudança, começando pelo dia (\"Qui 29/10: …\").")
     else:
         partes += ["# O que ele contou agora", fala["texto"]]
         ctx = fala.get("contexto") or {}
@@ -422,25 +488,79 @@ def _limpar(s: dict, permitidas: list[str] | None = None) -> tuple[str, list[str
     return resposta, mudancas, ops
 
 
-def atender(key: str, fala: dict, claude=None, agora: datetime | None = None) -> str:
-    """Pensa uma fala e devolve o estado final que a Semana registrou."""
+FALHA_AUDIO = "Não deu para entender o áudio. Tente de novo ou escreva."
+
+
+def transcrever(caminho: Path) -> str:
+    """A mesma transcrição da voz do celular no pipeline (`stt.transcribe_file`, sem nada a mais).
+    Import tardio: o faster-whisper só carrega quando chega o primeiro áudio."""
+    from . import stt
+    return stt.transcribe_file(Path(caminho)).text
+
+
+def _texto_do_audio(key: str, fid: str, transcrever_) -> str:
+    """Baixa o áudio da fala, grava num .m4a temporário, transcreve e apaga. Erro sobe."""
+    dados = _http("GET", "/api/dia?audio=" + urllib.parse.quote(fid, safe=""), key)
+    b64 = str(dados.get("audio") or "")
+    if "base64," in b64[:100]:  # data URL, por garantia
+        b64 = b64.split("base64,", 1)[1]
+    bruto = base64.b64decode(b64)
+    if not bruto:
+        return ""
+    fd, nome = tempfile.mkstemp(prefix="planeja-", suffix=".m4a")
+    try:
+        with os.fdopen(fd, "wb") as f:  # fechado antes do ffmpeg abrir (Windows)
+            f.write(bruto)
+        return (transcrever_(Path(nome)) or "").strip()
+    finally:
+        try:
+            os.remove(nome)
+        except OSError:
+            pass
+
+
+def atender(key: str, fala: dict, claude=None, agora: datetime | None = None, transcrever_=None) -> str:
+    """Pensa uma fala e devolve o estado final que a Semana registrou. Fala com áudio (contrato de
+    28/10/2026, §2) é transcrita antes; áudio que não vira texto é falha, sem chamar o Claude."""
     fid = fala["id"]
     _http("PUT", "/api/dia", key, {"id": fid, "estado": "pensando"})
+    if fala.get("tem_audio"):
+        try:
+            dito = _texto_do_audio(key, fid, transcrever_ or transcrever)
+        except Exception as e:
+            logger.warning(f"Dia {fid}: áudio não transcreveu: {e}")
+            dito = ""
+        if not dito:
+            _http("PUT", "/api/dia", key, {"id": fid, "estado": "falha", "resposta": FALHA_AUDIO})
+            return "falha"
+        escrito = str(fala.get("texto") or "").strip()  # texto e áudio juntos: nada se perde
+        fala = dict(fala, texto=f"{escrito}\n{dito}" if escrito else dito)
+        try:  # o "Você disse: …" do app; se a Semana não gravar, a fala segue assim mesmo
+            _http("PUT", "/api/dia", key, {"id": fid, "acao": "transcrito", "texto": fala["texto"]})
+        except Exception as e:
+            logger.warning(f"Dia {fid}: a Semana não gravou a transcrição: {e}")
     agora = agora or datetime.now(FUSO)
+    mudou = eh_mudou(fala)
     semana = _http("GET", "/api/semana", key)
     conversa = _http("GET", "/api/dia", key).get("conversa") or []
     remarcar = _http("GET", "/api/remarcar", key).get("remarcar") or []
+    complementos = []
+    if mudou:  # contexto a mais; se a caixa não vier, segue sem ela
+        try:
+            complementos = _http("GET", "/api/complementos", key).get("complementos") or []
+        except Exception as e:
+            logger.info(f"Dia {fid}: sem os complementos ({e})")
     if claude is None:
-        sis, esq = sistema(semana), schema(semana)
+        sis, esq = sistema(semana, mudou), schema(semana, mudou)
         claude = lambda p: rodar_claude(p, sis, esq)  # noqa: E731
     cortes = _ops_de_corte(fala, semana) if fala["tipo"] == "fechamento" else []
-    prompt = montar_prompt(fala, semana, conversa, remarcar, corte_da_semana(semana), agora)
+    prompt = montar_prompt(fala, semana, conversa, remarcar, corte_da_semana(semana), agora, complementos)
     erro = None
     for tentativa in range(2):
         p = prompt if erro is None else (
             prompt + f"\n\n# A sugestão anterior não se aplicou\nA página recusou as operações: {erro}\n"
                      "Corrija (ids e horários têm de existir no plano acima) e devolva de novo.")
-        resposta, mudancas, ops = _limpar(claude(p), ops_do_claude(semana))
+        resposta, mudancas, ops = _limpar(claude(p), ops_do_claude(semana, mudou))
         corpo = {"id": fid, "estado": "pronta", "resposta": resposta,
                  "mudancas": [frase + _texto_da(semana, o["tarefa"]) for o, frase in cortes] + mudancas,
                  "ops": [o for o, _ in cortes] + ops}
