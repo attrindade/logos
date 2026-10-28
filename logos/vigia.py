@@ -443,6 +443,29 @@ def chk_disco() -> dict:
     return _item("disco", "Disco C:", "ok", f"{livre:.0f} GB livres.")
 
 
+def chk_trilha(agora: float) -> dict | None:
+    """Do celular ao PC (LOG 9 da onda 4, 28/10/2026): atenção quando uma captura passa de 30 min entre
+    o "Guardar" no celular e o pacote no PC, contados só com o PC ligado (`logos/trilha.py`). Só o id
+    curto e horários. None antes de o drenador gravar a primeira trilha."""
+    from . import trilha
+    d = trilha.ler()
+    if not d:
+        return None
+    nome = "Do celular ao PC"
+    atrasos = trilha.atrasadas(agora, d)
+    if not atrasos:
+        return _item("trilha", nome, "ok", "")
+    a = atrasos[0]
+    vista = datetime.fromtimestamp(a["vista"]).strftime("%H:%M") if a.get("vista") else "?"
+    if a["chegou"]:
+        texto = f"A captura {a['id']} levou {round(a['segundos'] / 60)} min do celular ao PC, com o PC ligado (vista na Semana às {vista})."
+    else:
+        texto = f"A captura {a['id']} espera há {round(a['segundos'] / 60)} min na Semana, com o PC ligado (vista às {vista})."
+    if len(atrasos) > 1:
+        texto += f" Mais {len(atrasos) - 1}."
+    return _item("trilha", nome, "atencao", texto)
+
+
 _BUSCAR = object()
 
 
@@ -461,7 +484,7 @@ def checar(agora: float | None = None, lista=_BUSCAR) -> list[dict]:
         *chk_tarefas(tarefas() if lista is _BUSCAR else lista, agora),
         # As de 28/10 não derrubam as outras: uma checagem nova com defeito só some da lista.
         *[it for it in (_seguro(chk_relogio, agora), _seguro(chk_aw_coletores, agora),
-                        _seguro(chk_briefing, agora)) if it],
+                        _seguro(chk_briefing, agora), _seguro(chk_trilha, agora)) if it],
     ]
 
 

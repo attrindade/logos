@@ -273,7 +273,9 @@ def _executar(key: str, a: dict, chave, raiz: Path) -> tuple[str, str]:
         nota = organiza.nota_do_pacote(dec["pacote"], config.LEDGER_PATH) if dec and dec.get("pacote") else None
         ok, frase = caixa.corrigir(key, cid, novo, _pedido, nota)
         if ok:
-            eventos.registrar("organiza", f"Caixa: anotação {cid[:8]} corrigida pelo celular ({caixa.ROTULOS.get(novo, novo)}).", "info")
+            # O destino que ficou (uma correção tardia para Plano fica Nota: LOG 6a, 28/10).
+            ficou = (caixa.ler(cid) or {}).get("destino") or novo
+            eventos.registrar("organiza", f"Caixa: anotação {cid[:8]} corrigida pelo celular ({caixa.ROTULOS.get(ficou, ficou)}).", "info")
         return ("ok" if ok else "falha"), frase
     if tipo == "servico":
         alvo = str(dados.get("alvo") or "")

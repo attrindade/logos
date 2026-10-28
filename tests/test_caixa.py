@@ -359,7 +359,7 @@ def test_correcao_desfaz_aplica_e_troca_o_destino_da_nota(amb, tmp_path):
     assert texto.endswith("---\n\nfala literal\n")  # a transcrição não muda
     assert caixa.ultimas_correcoes()[-1]["para"] == "fim_de_semana"
     # de volta ao plano: id novo, porque a fala antiga foi recusada
-    ok, _ = caixa.corrigir("k", CID, "plano", semana, nota)
+    ok, _ = caixa.corrigir("k", CID, "plano", semana, nota, agora=AGORA)
     assert ok and semana.de("dia", "PUT")[-1]["id"] == f"caixa-{CID}-2"
     assert {"id": CID, "apagar": True} in semana.de("complementos")
     assert nota.read_text(encoding="utf-8").count("  - ") == 2
@@ -434,3 +434,130 @@ def test_manha_de_hoje_le_so_o_dia_certo(amb):
     assert sono.manha_de_hoje(datetime(2026, 10, 28, 9).astimezone()) == {"dia": "2026-10-28", "sono_min": 400}
     sono._gravar_estado({"manha": {"dia": "2026-10-28", "sono_min": "seis horas"}})
     assert sono.manha_de_hoje(datetime(2026, 10, 28, 9).astimezone()) is None
+
+
+# ---- onda 4 (28/10/2026): LOG 6a, 6b e 6c ----
+
+DEPOIS = datetime(2026, 10, 31, 10, 0)  # sábado, dois dias depois do "amanhã" (quinta, 29/10)
+
+
+def test_correcao_tardia_para_plano_fica_nota_sem_fala_de_hoje(amb, tmp_path):
+    """6a: a correção para Plano respeita a fala velha. Era Recado; ele toca em Plano no sábado, mas
+    a fala era para quinta: o recado não volta, nenhuma fala vai a /api/dia e o destino fica Nota."""
+    caixa.decidir(_manifest(), "amanhã ligo pro Osmar", FALADO, route=Route.INBOX, agora=AGORA,
+                  claude=Modelo(_resp("fim_de_semana", 0.9, "amanha")))
+    semana = Semana()
+    caixa.aplicar("k", caixa.ler(CID), semana, agora=AGORA)
+    nota = _nota_com_destino(tmp_path, "fim_de_semana")
+    ok, frase = caixa.corrigir("k", CID, "plano", semana, nota, agora=DEPOIS)
+    assert ok and frase == "Isto era para quinta, 29/10, que já passou: ficou como Nota."
+    assert semana.de("dia") == []  # nenhuma fala de hoje
+    assert {"id": CID, "apagar": True} in semana.de("complementos")  # o efeito anterior saiu
+    dec = caixa.ler(CID)
+    assert dec["destino"] == "nota" and dec["entendi"] == frase and dec["alvo"] == ""
+    estado = semana.de("capturas/estado")[-1]
+    assert estado["destino"] == "nota" and estado["entendi"] == frase and len(frase) <= caixa.MAX_ENTENDI
+    assert "destino: nota" in nota.read_text(encoding="utf-8")
+    assert caixa.ultimas_correcoes()[-1]["para"] == "plano"  # o que ele disse vai para o prompt
+
+
+def test_correcao_tardia_de_nota_para_plano_nao_muda_nada(amb, tmp_path):
+    caixa.decidir(_manifest(), "hoje à tarde ligo pro Osmar", FALADO, route=Route.INBOX, agora=AGORA,
+                  claude=Modelo(_resp("nota", 0.9, "hoje")))
+    semana = Semana()
+    caixa.aplicar("k", caixa.ler(CID), semana, agora=AGORA)
+    nota = _nota_com_destino(tmp_path, "nota")
+    antes = nota.read_text(encoding="utf-8")
+    ok, frase = caixa.corrigir("k", CID, "plano", semana, nota, agora=DEPOIS)
+    assert ok and frase == "Isto era para quarta, 28/10, que já passou: ficou como Nota."
+    assert semana.pedidos == [] and nota.read_text(encoding="utf-8") == antes
+    assert caixa.ler(CID)["destino"] == "nota" and caixa.ler(CID)["correcoes"] == []
+
+
+def test_correcao_para_plano_ainda_valida_leva_o_dia_na_frente(amb):
+    """Dentro do prazo: vira fala de hoje, com o "Para quinta, 29/10:" (antes da correção, o alvo
+    ficava vazio quando a decisão original não era Plano)."""
+    caixa.decidir(_manifest(), "amanhã ligo pro Osmar", FALADO, route=Route.INBOX, agora=AGORA,
+                  claude=Modelo(_resp("nota", 0.9, "amanha")))
+    semana = Semana()
+    caixa.aplicar("k", caixa.ler(CID), semana, agora=AGORA)
+    ok, frase = caixa.corrigir("k", CID, "plano", semana, agora=AGORA)
+    assert ok and frase == "Mudei para Plano."
+    [fala] = semana.de("dia")
+    assert fala["dia"] == "2026-10-28" and fala["texto"].startswith("Para quinta, 29/10:")
+
+
+def test_correcao_para_plano_sem_dia_dito_vale_para_hoje(amb):
+    """Sem `quando`, ele não disse dia nenhum: dias depois, o toque em Plano põe no plano de hoje."""
+    caixa.decidir(_manifest(), "ligar pro encanador", FALADO, route=Route.INBOX, agora=AGORA,
+                  claude=Modelo(_resp("nota", 0.9, "")))
+    semana = Semana()
+    caixa.aplicar("k", caixa.ler(CID), semana, agora=AGORA)
+    ok, frase = caixa.corrigir("k", CID, "plano", semana, agora=DEPOIS)
+    assert ok and frase == "Mudei para Plano."
+    [fala] = semana.de("dia")
+    assert fala["dia"] == "2026-10-31" and fala["texto"].startswith("Para sábado, 31/10:")
+
+
+def test_acao_caixa_mudar_tardia_registra_o_destino_que_ficou(amb, monkeypatch, tmp_path):
+    caixa.decidir(_manifest(), "frase", FALADO, route=Route.INBOX, agora=AGORA,
+                  claude=Modelo(_resp("recado", 0.9, "hoje")), pacote=NOME)
+    monkeypatch.setattr(organiza, "nota_do_pacote", lambda nome, lp: None)
+    monkeypatch.setattr(caixa, "datetime", type("D", (datetime,), {"now": staticmethod(lambda: DEPOIS)}))
+    semana = Semana()
+    monkeypatch.setattr(acoes_celular, "_pedido", semana)
+    vistos = []
+    monkeypatch.setattr(acoes_celular.eventos, "registrar", lambda *a, **k: vistos.append(a[1]))
+    chave = X25519PrivateKey.generate()
+    aid = "acao-caixa-2"
+    dados = {"tipo": "caixa_mudar", "captura_id": CID, "destino": "plano"}
+    a = {"id": aid, "tipo": "caixa_mudar",
+         "env": json.dumps(cofre.selar(json.dumps(dados).encode(), aid, cofre.publica_b64(chave)))}
+    estado, frase = acoes_celular._executar("k", a, chave, tmp_path)
+    assert estado == "ok" and "ficou como Nota" in frase
+    assert vistos and vistos[-1].endswith("(Nota).")
+
+
+def test_linha_caixa_nao_conta_como_entendeu_quando_nenhum_modelo_respondeu(amb):
+    """6b: os dois modelos fora não é "PC entendeu". O formato fica o do contrato (só as 3 chaves)."""
+    caixa.gravar({"captura_id": "cap-ok-0001", "destino": "plano", "modelo": "claude-opus-5-5", "decidido_em": 1_000_000})
+    caixa.gravar({"captura_id": "cap-fora-001", "destino": "nota", "modelo": "nenhum", "decidido_em": 1_000_000})
+    # corrigida por ele depois: conta (o destino foi dele)
+    caixa.gravar({"captura_id": "cap-fora-002", "destino": "recado", "modelo": "nenhum", "decidido_em": 1_000_000,
+                  "correcoes": [{"de": "nota", "para": "recado"}]})
+    dados = caixa.contagens(0, agora=1_000_100)
+    assert dados == {"entendeu": 2, "esperando": 0, "por_destino": {"plano": 1, "recado": 1}}
+    assert set(dados) == {"entendeu", "esperando", "por_destino"}
+
+
+def test_drenador_conta_nenhum_como_esperando_ate_virar_nota(amb, monkeypatch, tmp_path):
+    falha = Modelo(erro=RuntimeError("fora"))
+    caixa.decidir(_manifest(), "qualquer coisa", FALADO, route=Route.INBOX, agora=AGORA, claude=falha, ollama=falha)
+    semana = Semana()
+    monkeypatch.setattr(organiza, "_pedido", lambda m, u, k, c=None: (
+        {"capturas": []} if u.endswith("/pendentes") else semana(m, u, k, c)))
+    monkeypatch.setattr(organiza, "caminho_chave_existe", lambda: False)
+    monkeypatch.setattr(organiza, "fechar_descartadas", lambda key: 0)
+    organiza._gravar_entregues({CID: NOME})
+    monkeypatch.setattr(organiza, "nota_do_pacote", lambda nome, lp: None)  # a nota ainda não saiu
+    organiza.passo("k", config.INBOX_DIR, tmp_path / "of", tmp_path / "ledger.json")
+    assert semana.de("linhas")[-1]["dados"] == {"entendeu": 0, "esperando": 1, "por_destino": {}}
+    nota = tmp_path / "n.md"
+    nota.write_text("---\ntitulo: T\n---\n", encoding="utf-8")
+    monkeypatch.setattr(organiza, "nota_do_pacote", lambda nome, lp: nota)
+    organiza.passo("k", config.INBOX_DIR, tmp_path / "of", tmp_path / "ledger.json")  # vira nota
+    organiza.passo("k", config.INBOX_DIR, tmp_path / "of", tmp_path / "ledger.json")
+    assert semana.de("linhas")[-1]["dados"] == {"entendeu": 0, "esperando": 0, "por_destino": {}}
+
+
+def test_tempo_no_log_e_o_total_quando_o_claude_falha(amb, caplog, monkeypatch):
+    """6c: o Claude gasta 60 s e falha, o Ollama responde em 3 s: o log diz 63 s, com a reserva."""
+    relogio = iter([100.0, 160.0, 163.0, 163.0])
+    monkeypatch.setattr(caixa.time, "monotonic", lambda: next(relogio))
+    claude = Modelo(erro=TimeoutError("passou de 60 s"))
+    ollama = Modelo(_resp("nota", 0.8), nome="gemma4:e4b")
+    with caplog.at_level(logging.INFO, logger="logos.caixa"):
+        dec = caixa.decidir(_manifest(), "uma ideia", FALADO, route=Route.INBOX, agora=AGORA,
+                            claude=claude, ollama=ollama)
+    assert dec["segundos"] == 63.0 and dec["segundos_reserva"] == 3.0
+    assert "por gemma4:e4b em 63,0 s (reserva 3,0 s)" in caplog.text

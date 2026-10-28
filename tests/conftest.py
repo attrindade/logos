@@ -31,5 +31,8 @@ os.environ["LOGOS_VISION_MODEL"] = ""
 # A caixa da captura (logos/caixa.py) chamaria o claude.exe de verdade em todo pacote do Organiza.
 # Desligada aqui; os testes dela ligam com monkeypatch e passam o Claude e o Ollama simulados.
 os.environ["LOGOS_CAIXA_LIGADA"] = "0"
+# Vazio = nenhum caminho fora do vault do celular (o de fábrica). Sem isto a suíte herdaria o
+# vault_celular_fora do logos_config.yaml (ligado em 28/10/2026) e os testes do vault contariam errado.
+os.environ["LOGOS_VAULT_CELULAR_FORA"] = ""
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

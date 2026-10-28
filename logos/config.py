@@ -166,7 +166,11 @@ GADGETBRIDGE_DB = Path(_raw_gb_db).expanduser() if _raw_gb_db else None
 # de fábrica = tudo da lista vai, como desde 14/10. Em 28/10/2026 viu-se que o reenvio "1 enviada(s)"
 # a cada 10 min era o `inbox/sessoes-<dia>.md`, que o hook do Claude Code reescreve a cada resposta:
 # ["inbox/sessoes-"] corta isso (e apaga as cópias dele no celular). Decisão dele.
-VAULT_CELULAR_FORA = [str(x) for x in (_user_cfg.get("vault_celular_fora") or [])]
+# LOGOS_VAULT_CELULAR_FORA (vírgulas; vazia = nenhum) tem precedência: a suíte de testes a zera para
+# não herdar a chave do logos_config.yaml (ligada em 28/10/2026, onda 4).
+_FORA_ENV = os.getenv("LOGOS_VAULT_CELULAR_FORA")
+VAULT_CELULAR_FORA = ([x.strip() for x in _FORA_ENV.split(",") if x.strip()] if _FORA_ENV is not None
+                      else [str(x) for x in (_user_cfg.get("vault_celular_fora") or [])])
 
 # ---------------------------------------------------------
 # Vigia: checagens novas de 28/10/2026 (`logos/vigia.py`)

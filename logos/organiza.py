@@ -28,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-from . import config, cofre, eventos
+from . import config, cofre, eventos, trilha
 from .config import load_secrets
 from .pacote import MANIFEST, write_manifest
 
@@ -538,6 +538,7 @@ def _tentar_depois(c: dict, e: Exception) -> None:
 def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int, int]:
     """Uma volta: entrega as pendentes e avisa as que viraram nota. Devolve (entregues, notas).
     Cada nota tem o seu try: uma com defeito não segura as outras na fila."""
+    trilha.volta()  # o PC estava ligado desde quando (a trilha das capturas, LOG 9 da onda 4)
     entregues = _ler_entregues()
     novas = 0
     chave_cofre = None
@@ -565,7 +566,9 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
     # uma definitiva podia sair do corte, voltar à janela e ganhar "pegando" a cada minuto.
     fixas = sorted(definitivas) + sorted(vazias.keys() - definitivas.keys())
     pular = ",".join((fixas + sorted((_FALHARAM | esperando) - set(fixas)))[:PULAR_MAX])
-    for c in _pedido("GET", URL + "/pendentes" + (f"?pular={pular}" if pular else ""), key).get("capturas", []):
+    pendentes = _pedido("GET", URL + "/pendentes" + (f"?pular={pular}" if pular else ""), key).get("capturas", [])
+    trilha.vistas(pendentes)  # só horários e id curto (LOG 9 da onda 4); nunca falha
+    for c in pendentes:
         diario = eh_diario(c)
         # "pegando" antes de baixar: a partir daqui o celular não reabre nem acrescenta (revisão de
         # 14/10: uma parte que entrasse no meio da entrega sumia calada). 409 = reabriu antes.
@@ -637,6 +640,7 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         if diario:
             entregues[c["id"]] = "diario:" + destino.name  # na volta, sem título (ver abaixo)
         _gravar_entregues(entregues)  # antes de avisar: se a Semana não ouvir, a próxima volta não duplica
+        trilha.no_pc(c["id"])
         try:
             _pedido("PUT", URL + "/estado", key, {"id": c["id"], "estado": "pc"})
         except Exception as e:
@@ -645,8 +649,10 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
         logger.info(f"Organiza: {destino.name} entregue à Inbox")
         eventos.registrar("organiza", "Diário do celular chegou ao PC." if diario else f"Anotação do celular chegou ao PC ({destino.name}).")
     notas = 0
-    # A caixa (logos/caixa.py): as entregues fora do Diário que ainda não têm decisão.
-    esperando = sum(1 for cid, nome in entregues.items() if not nome.startswith("diario:") and caixa_da(cid) is None)
+    # A caixa (logos/caixa.py): as entregues fora do Diário que ainda não têm decisão, ou cuja decisão
+    # foi "nenhum modelo respondeu" (LOG 6b): contam como esperando até virarem nota no app.
+    esperando = sum(1 for cid, nome in entregues.items() if not nome.startswith("diario:")
+                    and _esperando_caixa(caixa_da(cid)))
     for cid, nome in list(entregues.items()):
         diario = nome.startswith("diario:")
         nome = nome.removeprefix("diario:")
@@ -684,6 +690,8 @@ def passo(key: str, inbox: Path, oficina: Path, ledger_path: Path) -> tuple[int,
                 continue  # tenta de novo na próxima volta, sem segurar as outras
         del entregues[cid]
         _gravar_entregues(entregues)
+        if nota is not None:
+            trilha.nota(cid)
         notas += 1
     linha_da_caixa(key, esperando)
     return novas, notas
@@ -696,6 +704,13 @@ def caixa_da(cid: str) -> dict | None:
         return None
     from . import caixa
     return caixa.ler(cid)
+
+
+def _esperando_caixa(dec: dict | None) -> bool:
+    if dec is None:
+        return True
+    from . import caixa
+    return caixa.nao_entendeu(dec)
 
 
 def aplicar_caixa(key: str, cid: str) -> dict | None:
@@ -924,6 +939,7 @@ def main() -> None:
             if time.time() - ultima_ida >= IDA_S or acoes_celular.ida_pedida() or briefing_novo(ultima_ida):
                 ultima_ida = time.time()
                 ida_ao_celular(key)
+        trilha.descanso()  # o fim da volta: o que passar de 60 s até a próxima é PC parado
         time.sleep(INTERVALO_S)
 
 

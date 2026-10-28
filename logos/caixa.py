@@ -334,15 +334,19 @@ def decidir(manifest: dict, texto: str, falado_em: datetime, route: Route | None
     ollama = ollama or chamar_ollama
     bruto, modelo, t0 = None, "", time.monotonic()
     curto = cid[:8]
+    reserva = None  # o tempo só da reserva, quando o Claude falhou
     try:
         bruto, modelo = claude(prompt)
     except Exception as e:
         logger.warning(f"Caixa {curto}: o Claude não respondeu ({type(e).__name__}: {str(e)[:160]}); vai o Ollama")
-        t0 = time.monotonic()
+        t1 = time.monotonic()
         try:
             bruto, modelo = ollama(prompt)
         except Exception as e2:
             logger.warning(f"Caixa {curto}: o Ollama também não ({type(e2).__name__}: {str(e2)[:160]}); fica Nota")
+        reserva = round(time.monotonic() - t1, 1)
+    # O tempo total, do pedido ao Claude até a resposta (revisão da onda 2, ressalva 2: antes, depois
+    # de uma falha do Claude, a linha mostrava só o tempo do Ollama).
     segundos = round(time.monotonic() - t0, 1)
     if isinstance(bruto, dict):
         dec = normalizar(bruto, falado_em, agora, forcar)
@@ -356,9 +360,12 @@ def decidir(manifest: dict, texto: str, falado_em: datetime, route: Route | None
         "efeito": None, "enviado": None, "correcoes": [],
     })
     gravar(dec)
+    if reserva is not None:
+        dec["segundos_reserva"] = reserva
     extra = f", {dec['motivo']}" if dec["motivo"] else ""
+    parte = f" (reserva {str(reserva).replace('.', ',')} s)" if reserva is not None else ""
     logger.info(f"Caixa {curto}: {dec['destino']} ({str(dec['confianca']).replace('.', ',')}) "
-                f"por {modelo} em {str(segundos).replace('.', ',')} s{extra}")
+                f"por {modelo} em {str(segundos).replace('.', ',')} s{parte}{extra}")
     return dec
 
 
@@ -458,37 +465,88 @@ def enviar_estado(key: str, dec: dict, pedido) -> None:
     gravar(dec)
 
 
-def corrigir(key: str, cid: str, novo: str, pedido, nota: Path | None = None) -> tuple[bool, str]:
+def _alvo_da_correcao(dec: dict, agora: datetime) -> date:
+    """O dia a que a fala se refere, para uma correção que vai para Plano.
+
+    Com `quando` dito ("hoje", "amanhã", uma data), é a mesma conta do classificador (`_alvo`, a
+    partir de quando ele falou). Sem `quando`, ele não disse dia nenhum: o toque em Plano quer dizer
+    "põe no plano", e o alvo é hoje (o dia lógico de agora). Sem isso, toda anotação sem data de ontem
+    corrigida para Plano viraria "isto era para ontem", o que ele nunca disse (escolha de 28/10, LOG 6a)."""
+    quando = str(dec.get("quando") or "").strip()
+    falado = dec.get("falado_em")
+    try:
+        falado_em = datetime.fromisoformat(falado) if falado else agora
+    except ValueError:
+        falado_em = agora
+    if not quando:
+        return dia_logico(agora)
+    return _alvo(quando, falado_em)
+
+
+def _dia_curto(d: date) -> str:
+    return f"{NOMES_DIAS[d.weekday()]}, {d:%d/%m}"
+
+
+def corrigir(key: str, cid: str, novo: str, pedido, nota: Path | None = None,
+             agora: datetime | None = None) -> tuple[bool, str]:
     """A correção em 1 toque (`/api/acoes`, tipo `caixa_mudar`): desfaz o efeito anterior, aplica o
-    novo, troca o `destino:` da nota e guarda o par para os próximos prompts."""
+    novo, troca o `destino:` da nota e guarda o par para os próximos prompts.
+
+    A regra da fala velha vale também aqui (LOG 6a, 28/10): uma correção para Plano cujo alvo já
+    passou (antes do dia lógico de agora) não vira fala de hoje. Ela fica **Nota**, com a frase "Isto
+    era para <dia>, que já passou: ficou como Nota.". Nota, e não Fim de semana, porque é a regra
+    "na dúvida, Nota" do contrato, já conhecida, e porque Nota não dispara efeito nenhum que ele não
+    escolheu (o Fim de semana criaria um complemento na Semana). O par "era Plano" vai assim mesmo
+    para `correcoes.jsonl`: é o que ele disse, e serve de exemplo ao classificador."""
     if novo not in DESTINOS:
         return False, "Esse destino não existe na caixa."
     dec = ler(cid)
     if dec is None:
         return False, "Essa anotação não passou pela caixa."
+    agora = agora or datetime.now()
     antes = dec.get("destino")
     if antes == novo:
         return True, f"Já estava em {ROTULOS[novo]}."
+    pedido_por_ele = novo
+    velha = ""
+    if novo == "plano":
+        alvo = _alvo_da_correcao(dec, agora)
+        if alvo < dia_logico(agora):
+            velha = f"Isto era para {_dia_curto(alvo)}, que já passou: ficou como Nota."
+            novo = "nota"
+        else:
+            dec["alvo"] = alvo.isoformat()  # o "Para quinta, 29/10:" na frente da fala
+    if antes == novo:  # era Nota e a correção para Plano chegou tarde: nada muda, só a frase
+        _guardar_correcao(dec, antes, pedido_por_ele)
+        logger.info(f"Caixa {cid[:8]}: correção para plano recusada (fala velha); fica {antes}")
+        return True, velha
     frase = desfazer(key, dec, pedido)
     dec["correcoes"] = list(dec.get("correcoes") or []) + [{"de": antes, "para": novo, "em": int(time.time())}]
-    dec["destino"], dec["motivo"] = novo, "corrigido por ele"
+    dec["destino"], dec["motivo"] = novo, ("fala velha (correção)" if velha else "corrigido por ele")
+    if velha:
+        dec["entendi"], dec["alvo"] = velha, ""  # com o dia certo (o FRASE_VELHA diz "ontem")
     gravar(dec)
-    aplicar(key, dec, pedido)
+    aplicar(key, dec, pedido, agora=agora)
     enviar_estado(key, dec, pedido)
     if nota is not None:
         try:
             trocar_destino_na_nota(nota, antes, novo)
         except OSError as e:
             logger.warning(f"Caixa {cid[:8]}: a nota não mudou ({e})")
+    _guardar_correcao(dec, antes, pedido_por_ele)
+    logger.info(f"Caixa {cid[:8]}: corrigida de {antes} para {novo}" + (" (fala velha)" if velha else ""))
+    return True, " ".join(filter(None, [velha or f"Mudei para {ROTULOS[novo]}.", frase]))
+
+
+def _guardar_correcao(dec: dict, antes: str, para: str) -> None:
+    """O par "o PC achou X, era Y" para os próximos prompts (`ultimas_correcoes`)."""
     try:
         pasta().mkdir(parents=True, exist_ok=True)
         with open(_correcoes_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps({"texto": (dec.get("texto_limpo") or "")[:200], "de": antes, "para": novo,
+            f.write(json.dumps({"texto": (dec.get("texto_limpo") or "")[:200], "de": antes, "para": para,
                                 "em": int(time.time())}, ensure_ascii=False) + "\n")
     except OSError as e:
         logger.warning(f"Caixa: correção não guardada para o prompt ({e})")
-    logger.info(f"Caixa {cid[:8]}: corrigida de {antes} para {novo}")
-    return True, " ".join(filter(None, [f"Mudei para {ROTULOS[novo]}.", frase]))
 
 
 def trocar_destino_na_nota(nota: Path, antes: str, novo: str) -> None:
@@ -525,10 +583,21 @@ def trocar_destino_na_nota(nota: Path, antes: str, novo: str) -> None:
 # A linha `caixa` (para o launcher): só números
 # ---------------------------------------------------------------------------------------------
 
+def nao_entendeu(dec: dict | None) -> bool:
+    """Os dois modelos fora (`modelo: nenhum`) e ninguém corrigiu: o PC guardou como Nota, mas não
+    entendeu nada. Não conta como "entendeu" na linha (LOG 6b, 28/10); o drenador conta como
+    "esperando" enquanto ela não virou nota no app."""
+    return bool(dec) and dec.get("modelo") == "nenhum" and not dec.get("correcoes")
+
+
 def contagens(esperando: int, agora: float | None = None) -> dict:
+    """`entendeu` e `por_destino`: as decisões das últimas 12 h, menos as que nenhum modelo entendeu.
+    O formato fica o do contrato (`lib/caixa.mjs` recusa qualquer outra chave com 400)."""
     agora = agora or time.time()
     por: dict[str, int] = {}
     for d in todas():
+        if nao_entendeu(d):
+            continue
         if agora - float(d.get("decidido_em") or 0) <= JANELA_LINHA_S and d.get("destino") in DESTINOS:
             por[d["destino"]] = por.get(d["destino"], 0) + 1
     return {"entendeu": sum(por.values()), "esperando": max(0, int(esperando)), "por_destino": por}
